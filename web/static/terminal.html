@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AgentStack Terminal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Top bar */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    min-height: 44px;
+    flex-shrink: 0;
+  }
+
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .status-dot.connected { background: var(--green); }
+
+  .agent-name {
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  .agent-selector {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .topbar-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn {
+    background: var(--surface);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { color: var(--text); border-color: var(--accent); }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .btn.spawn { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.spawn:hover { opacity: 0.9; }
+
+  /* Sessions bar */
+  .sessions-bar {
+    display: flex;
+    gap: 4px;
+    padding: 6px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+
+  .session-tab {
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .session-tab:hover { color: var(--text); }
+  .session-tab.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  /* Terminal */
+  #terminal-container {
+    flex: 1;
+    padding: 4px;
+    overflow: hidden;
+  }
+
+  /* Spawn dialog */
+  .dialog-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .dialog-overlay.show { display: flex; }
+
+  .dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    width: 90%;
+    max-width: 360px;
+  }
+
+  .dialog h3 {
+    margin-bottom: 12px;
+    font-size: 16px;
+  }
+
+  .dialog-agents {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .agent-card {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .agent-card:hover { border-color: var(--accent); }
+  .agent-card .name { font-weight: 600; font-size: 14px; }
+  .agent-card .desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  .dialog-close {
+    margin-top: 12px;
+    width: 100%;
+    padding: 8px;
+    background: var(--bg);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  /* Status bar */
+  .statusbar {
+    padding: 4px 12px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  /* No sessions placeholder */
+  .placeholder {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    gap: 12px;
+  }
+  .placeholder .icon { font-size: 48px; }
+  .placeholder p { font-size: 14px; }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="agent-name" id="currentAgent">AgentStack</span>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn spawn" onclick="showSpawnDialog()">+ Spawn</button>
+    <button class="btn danger" id="killBtn" onclick="killCurrent()" style="display:none">Kill</button>
+  </div>
+</div>
+
+<!-- Session tabs -->
+<div class="sessions-bar" id="sessionsBar"></div>
+
+<!-- Terminal -->
+<div id="terminal-container" style="display:none"></div>
+
+<!-- Placeholder when no sessions -->
+<div class="placeholder" id="placeholder">
+  <div class="icon">&#9000;</div>
+  <p>No active agents</p>
+  <button class="btn spawn" onclick="showSpawnDialog()">Spawn your first agent</button>
+</div>
+
+<!-- Status bar -->
+<div class="statusbar">
+  <span id="statusText">Connecting...</span>
+  <span id="sessionCount">0 sessions</span>
+</div>
+
+<!-- Spawn dialog -->
+<div class="dialog-overlay" id="spawnDialog">
+  <div class="dialog">
+    <h3>Spawn Agent</h3>
+    <div class="dialog-agents" id="agentsList"></div>
+    <button class="dialog-close" onclick="hideSpawnDialog()">Cancel</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+let ws = null;
+let term = null;
+let fitAddon = null;
+let currentSession = null;
+let sessions = [];
+let agents = {};
+
+// Telegram WebApp
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+  // Apply Telegram theme
+  if (tg.themeParams?.bg_color) {
+    document.documentElement.style.setProperty('--bg', tg.themeParams.bg_color);
+  }
+}
+
+// Get auth token from URL params
+const params = new URLSearchParams(location.search);
+const authToken = params.get('token') || '';
+
+function initTerminal() {
+  term = new Terminal({
+    theme: {
+      background: '#0d1117',
+      foreground: '#e6edf3',
+      cursor: '#58a6ff',
+      cursorAccent: '#0d1117',
+      selectionBackground: '#264f78',
+      black: '#484f58',
+      red: '#ff7b72',
+      green: '#3fb950',
+      yellow: '#d29922',
+      blue: '#58a6ff',
+      magenta: '#bc8cff',
+      cyan: '#39c5cf',
+      white: '#b1bac4',
+      brightBlack: '#6e7681',
+      brightRed: '#ffa198',
+      brightGreen: '#56d364',
+      brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#56d4dd',
+      brightWhite: '#f0f6fc',
+    },
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+    fontSize: 13,
+    lineHeight: 1.2,
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    scrollback: 5000,
+    allowProposedApi: true,
+  });
+
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+  const container = document.getElementById('terminal-container');
+  term.open(container);
+  fitAddon.fit();
+
+  // Send keystrokes to server
+  term.onData(data => {
+    if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
+      ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
+    }
+  });
+
+  // Resize handling
+  term.onResize(({ cols, rows }) => {
+    if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
+      ws.send(JSON.stringify({ type: 'resize', session: currentSession, cols, rows }));
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (fitAddon) fitAddon.fit();
+  });
+}
+
+function connect() {
+  ws = new WebSocket(WS_URL + '?token=' + authToken);
+
+  ws.onopen = () => {
+    document.getElementById('statusDot').classList.add('connected');
+    document.getElementById('statusText').textContent = 'Connected';
+    // Request session list
+    ws.send(JSON.stringify({ type: 'list_sessions' }));
+    ws.send(JSON.stringify({ type: 'list_agents' }));
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    switch (msg.type) {
+      case 'output':
+        if (msg.session === currentSession && term) {
+          term.write(msg.data);
+        }
+        break;
+
+      case 'sessions':
+        sessions = msg.sessions || [];
+        renderSessions();
+        break;
+
+      case 'agents':
+        agents = msg.agents || {};
+        break;
+
+      case 'spawned':
+        currentSession = msg.session;
+        sessions = msg.sessions || sessions;
+        renderSessions();
+        switchToSession(msg.session);
+        break;
+
+      case 'killed':
+        sessions = msg.sessions || sessions;
+        if (currentSession === msg.session) {
+          currentSession = sessions.length > 0 ? sessions[0] : null;
+        }
+        renderSessions();
+        if (currentSession) switchToSession(currentSession);
+        else showPlaceholder();
+        break;
+
+      case 'error':
+        if (term) term.write('\r\n\x1b[31m' + msg.message + '\x1b[0m\r\n');
+        break;
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('statusDot').classList.remove('connected');
+    document.getElementById('statusText').textContent = 'Disconnected. Reconnecting...';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+function renderSessions() {
+  const bar = document.getElementById('sessionsBar');
+  bar.innerHTML = '';
+
+  sessions.forEach(name => {
+    const tab = document.createElement('div');
+    tab.className = 'session-tab' + (name === currentSession ? ' active' : '');
+    tab.textContent = name;
+    tab.onclick = () => switchToSession(name);
+    bar.appendChild(tab);
+  });
+
+  document.getElementById('sessionCount').textContent = sessions.length + ' session(s)';
+
+  if (sessions.length > 0) {
+    document.getElementById('placeholder').style.display = 'none';
+    document.getElementById('terminal-container').style.display = 'block';
+    document.getElementById('killBtn').style.display = '';
+    if (!currentSession) switchToSession(sessions[0]);
+  } else {
+    showPlaceholder();
+  }
+}
+
+function showPlaceholder() {
+  document.getElementById('placeholder').style.display = 'flex';
+  document.getElementById('terminal-container').style.display = 'none';
+  document.getElementById('killBtn').style.display = 'none';
+  document.getElementById('currentAgent').textContent = 'AgentStack';
+  currentSession = null;
+}
+
+function switchToSession(name) {
+  currentSession = name;
+  document.getElementById('currentAgent').textContent = name;
+  document.getElementById('killBtn').style.display = '';
+
+  // Update tab highlighting
+  document.querySelectorAll('.session-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.textContent === name);
+  });
+
+  // Clear terminal and request current content
+  if (term) term.clear();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'attach', session: name }));
+    // Notify server of terminal size
+    if (fitAddon) fitAddon.fit();
+  }
+}
+
+function showSpawnDialog() {
+  const list = document.getElementById('agentsList');
+  list.innerHTML = '';
+
+  // Add preset agents
+  Object.entries(agents).forEach(([name, cfg]) => {
+    const card = document.createElement('div');
+    card.className = 'agent-card';
+    card.innerHTML = `<div class="name">${name}</div><div class="desc">${cfg.description || ''}</div>`;
+    card.onclick = () => spawnAgent(name);
+    list.appendChild(card);
+  });
+
+  // Custom agent option
+  const custom = document.createElement('div');
+  custom.className = 'agent-card';
+  custom.innerHTML = '<div class="name">custom</div><div class="desc">Start a plain Claude Code session with a custom name</div>';
+  custom.onclick = () => {
+    const name = prompt('Agent name:');
+    if (name) spawnAgent(name.toLowerCase().replace(/[^a-z0-9_-]/g, ''));
+  };
+  list.appendChild(custom);
+
+  document.getElementById('spawnDialog').classList.add('show');
+}
+
+function hideSpawnDialog() {
+  document.getElementById('spawnDialog').classList.remove('show');
+}
+
+function spawnAgent(name) {
+  hideSpawnDialog();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'spawn', session: name }));
+    document.getElementById('statusText').textContent = `Spawning ${name}...`;
+  }
+}
+
+function killCurrent() {
+  if (!currentSession) return;
+  if (!confirm(`Kill agent "${currentSession}"?`)) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'kill', session: currentSession }));
+  }
+}
+
+// Init
+initTerminal();
+connect();
+</script>
+</body>
+</html>

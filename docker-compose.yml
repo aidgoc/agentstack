@@ -1,0 +1,15 @@
+services:
+  agentstack:
+    build: .
+    container_name: agentstack
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8765:8765"
+    volumes:
+      # Persist shared workspace
+      - ./shared:/app/shared
+      # Mount Claude Code config (API key, settings)
+      - ~/.claude:/root/.claude
+    environment:
+      - AGENTSTACK_PORT=8765
