@@ -60,16 +60,6 @@
     font-size: 14px;
   }
 
-  .agent-selector {
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 13px;
-    cursor: pointer;
-  }
-
   .topbar-actions {
     display: flex;
     gap: 6px;
@@ -195,19 +185,6 @@
     justify-content: space-between;
     flex-shrink: 0;
   }
-
-  /* No sessions placeholder */
-  .placeholder {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    gap: 12px;
-  }
-  .placeholder .icon { font-size: 48px; }
-  .placeholder p { font-size: 14px; }
 </style>
 </head>
 <body>
@@ -216,10 +193,10 @@
 <div class="topbar">
   <div class="topbar-left">
     <div class="status-dot" id="statusDot"></div>
-    <span class="agent-name" id="currentAgent">AgentStack</span>
+    <span class="agent-name" id="currentAgent">Terminal</span>
   </div>
   <div class="topbar-actions">
-    <button class="btn spawn" onclick="showSpawnDialog()">+ Spawn</button>
+    <button class="btn spawn" onclick="showSpawnDialog()">+ New</button>
     <button class="btn danger" id="killBtn" onclick="killCurrent()" style="display:none">Kill</button>
   </div>
 </div>
@@ -228,14 +205,7 @@
 <div class="sessions-bar" id="sessionsBar"></div>
 
 <!-- Terminal -->
-<div id="terminal-container" style="display:none"></div>
-
-<!-- Placeholder when no sessions -->
-<div class="placeholder" id="placeholder">
-  <div class="icon">&#9000;</div>
-  <p>No active agents</p>
-  <button class="btn spawn" onclick="showSpawnDialog()">Spawn your first agent</button>
-</div>
+<div id="terminal-container"></div>
 
 <!-- Status bar -->
 <div class="statusbar">
@@ -246,7 +216,7 @@
 <!-- Spawn dialog -->
 <div class="dialog-overlay" id="spawnDialog">
   <div class="dialog">
-    <h3>Spawn Agent</h3>
+    <h3>New Session</h3>
     <div class="dialog-agents" id="agentsList"></div>
     <button class="dialog-close" onclick="hideSpawnDialog()">Cancel</button>
   </div>
@@ -265,13 +235,13 @@ let fitAddon = null;
 let currentSession = null;
 let sessions = [];
 let agents = {};
+let autoSpawned = false;
 
 // Telegram WebApp
 const tg = window.Telegram?.WebApp;
 if (tg) {
   tg.ready();
   tg.expand();
-  // Apply Telegram theme
   if (tg.themeParams?.bg_color) {
     document.documentElement.style.setProperty('--bg', tg.themeParams.bg_color);
   }
@@ -323,14 +293,12 @@ function initTerminal() {
   term.open(container);
   fitAddon.fit();
 
-  // Send keystrokes to server
   term.onData(data => {
     if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
       ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
     }
   });
 
-  // Resize handling
   term.onResize(({ cols, rows }) => {
     if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
       ws.send(JSON.stringify({ type: 'resize', session: currentSession, cols, rows }));
@@ -348,7 +316,6 @@ function connect() {
   ws.onopen = () => {
     document.getElementById('statusDot').classList.add('connected');
     document.getElementById('statusText').textContent = 'Connected';
-    // Request session list
     ws.send(JSON.stringify({ type: 'list_sessions' }));
     ws.send(JSON.stringify({ type: 'list_agents' }));
   };
@@ -366,6 +333,13 @@ function connect() {
       case 'sessions':
         sessions = msg.sessions || [];
         renderSessions();
+        // Auto-spawn a shell if no sessions exist
+        if (sessions.length === 0 && !autoSpawned) {
+          autoSpawned = true;
+          spawnSession('shell');
+        } else if (sessions.length > 0 && !currentSession) {
+          switchToSession(sessions[0]);
+        }
         break;
 
       case 'agents':
@@ -386,7 +360,6 @@ function connect() {
         }
         renderSessions();
         if (currentSession) switchToSession(currentSession);
-        else showPlaceholder();
         break;
 
       case 'error':
@@ -419,23 +392,7 @@ function renderSessions() {
   });
 
   document.getElementById('sessionCount').textContent = sessions.length + ' session(s)';
-
-  if (sessions.length > 0) {
-    document.getElementById('placeholder').style.display = 'none';
-    document.getElementById('terminal-container').style.display = 'block';
-    document.getElementById('killBtn').style.display = '';
-    if (!currentSession) switchToSession(sessions[0]);
-  } else {
-    showPlaceholder();
-  }
-}
-
-function showPlaceholder() {
-  document.getElementById('placeholder').style.display = 'flex';
-  document.getElementById('terminal-container').style.display = 'none';
-  document.getElementById('killBtn').style.display = 'none';
-  document.getElementById('currentAgent').textContent = 'AgentStack';
-  currentSession = null;
+  document.getElementById('killBtn').style.display = currentSession ? '' : 'none';
 }
 
 function switchToSession(name) {
@@ -443,16 +400,13 @@ function switchToSession(name) {
   document.getElementById('currentAgent').textContent = name;
   document.getElementById('killBtn').style.display = '';
 
-  // Update tab highlighting
   document.querySelectorAll('.session-tab').forEach(tab => {
     tab.classList.toggle('active', tab.textContent === name);
   });
 
-  // Clear terminal and request current content
   if (term) term.clear();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'attach', session: name }));
-    // Notify server of terminal size
     if (fitAddon) fitAddon.fit();
   }
 }
@@ -461,22 +415,32 @@ function showSpawnDialog() {
   const list = document.getElementById('agentsList');
   list.innerHTML = '';
 
-  // Add preset agents
+  // Shell option first
+  const shell = document.createElement('div');
+  shell.className = 'agent-card';
+  shell.innerHTML = '<div class="name">shell</div><div class="desc">New bash terminal — run anything</div>';
+  shell.onclick = () => {
+    const name = 'shell' + (sessions.filter(s => s.startsWith('shell')).length || '');
+    spawnSession(name === 'shell0' ? 'shell' : name);
+  };
+  list.appendChild(shell);
+
+  // Agent presets
   Object.entries(agents).forEach(([name, cfg]) => {
     const card = document.createElement('div');
     card.className = 'agent-card';
-    card.innerHTML = `<div class="name">${name}</div><div class="desc">${cfg.description || ''}</div>`;
-    card.onclick = () => spawnAgent(name);
+    card.innerHTML = `<div class="name">${name}</div><div class="desc">${cfg.description || 'Claude Code agent'}</div>`;
+    card.onclick = () => spawnSession(name);
     list.appendChild(card);
   });
 
-  // Custom agent option
+  // Custom name option
   const custom = document.createElement('div');
   custom.className = 'agent-card';
-  custom.innerHTML = '<div class="name">custom</div><div class="desc">Start a plain Claude Code session with a custom name</div>';
+  custom.innerHTML = '<div class="name">custom...</div><div class="desc">Custom named session</div>';
   custom.onclick = () => {
-    const name = prompt('Agent name:');
-    if (name) spawnAgent(name.toLowerCase().replace(/[^a-z0-9_-]/g, ''));
+    const name = prompt('Session name:');
+    if (name) spawnSession(name.toLowerCase().replace(/[^a-z0-9_-]/g, ''));
   };
   list.appendChild(custom);
 
@@ -487,17 +451,17 @@ function hideSpawnDialog() {
   document.getElementById('spawnDialog').classList.remove('show');
 }
 
-function spawnAgent(name) {
+function spawnSession(name) {
   hideSpawnDialog();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'spawn', session: name }));
-    document.getElementById('statusText').textContent = `Spawning ${name}...`;
+    document.getElementById('statusText').textContent = `Starting ${name}...`;
   }
 }
 
 function killCurrent() {
   if (!currentSession) return;
-  if (!confirm(`Kill agent "${currentSession}"?`)) return;
+  if (!confirm(`Kill "${currentSession}"?`)) return;
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'kill', session: currentSession }));
   }

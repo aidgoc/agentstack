@@ -17,6 +17,7 @@ cleanup() {
     [ -n "$BOT_PID" ]  && kill $BOT_PID 2>/dev/null
     [ -n "$CF_PID" ]   && kill $CF_PID 2>/dev/null
     [ -n "$WEB_PID" ]  && kill $WEB_PID 2>/dev/null
+    [ -n "$PC_PID" ]   && kill $PC_PID 2>/dev/null
     wait 2>/dev/null
     echo "Done."
 }
@@ -72,6 +73,34 @@ if [ -n "$BOT_TOKEN" ]; then
     curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-1&timeout=0" > /dev/null 2>&1
 fi
 sleep 2
+
+# ── 0. Paperclip (if configured) ─────────────────────
+PAPERCLIP_DIR="${PAPERCLIP_DIR:-$HOME/paperclip}"
+if [ -d "$PAPERCLIP_DIR" ] && [ -f "$PAPERCLIP_DIR/.env" ]; then
+    echo ""
+    echo "[0/3] Paperclip server"
+    # Start DB if using docker
+    if [ -f "$PAPERCLIP_DIR/docker-compose.yml" ]; then
+        (cd "$PAPERCLIP_DIR" && docker compose up db -d 2>/dev/null) || true
+        sleep 2
+    fi
+    # Check if already running
+    if curl -s http://127.0.0.1:3100/api/health > /dev/null 2>&1; then
+        echo "  Already running"
+    else
+        (cd "$PAPERCLIP_DIR" && source .env && export DATABASE_URL PORT SERVE_UI PAPERCLIP_DEPLOYMENT_MODE PAPERCLIP_DEPLOYMENT_EXPOSURE BETTER_AUTH_SECRET && pnpm dev:server > "$LOG_DIR/paperclip.log" 2>&1 &)
+        PC_PID=$!
+        sleep 3
+        if curl -s http://127.0.0.1:3100/api/health > /dev/null 2>&1; then
+            echo "  OK (http://127.0.0.1:3100)"
+        else
+            echo "  WARN: Paperclip may still be starting — check $LOG_DIR/paperclip.log"
+        fi
+    fi
+else
+    echo ""
+    echo "[0/3] Paperclip: not found (optional — clone to ~/paperclip)"
+fi
 
 # ── 1. Web server ────────────────────────────────────
 echo ""
@@ -150,10 +179,11 @@ echo ""
 echo "=================================="
 echo "  All systems go"
 echo "=================================="
-echo "  Web:      http://localhost:$PORT"
-echo "  Tunnel:   $TUNNEL_URL"
-echo "  Terminal: $WEBAPP_URL"
-echo "  Logs:     $LOG_DIR/"
+echo "  Web:       http://localhost:$PORT"
+echo "  Tunnel:    $TUNNEL_URL"
+echo "  Terminal:  $WEBAPP_URL"
+echo "  Paperclip: http://127.0.0.1:3100"
+echo "  Logs:      $LOG_DIR/"
 echo ""
 echo "  Ctrl+C to stop"
 echo "=================================="

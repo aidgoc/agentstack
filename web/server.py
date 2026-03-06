@@ -1,8 +1,7 @@
-"""WebSocket terminal server for AgentStack Mini App.
+"""WebSocket terminal server for AgentStack.
 
-Multi-user: each WebSocket connection is authenticated via token.
-Sessions are namespaced per user (user_id:agent_name).
-Each user's Claude Code processes run with their own API key.
+Single-owner: only authenticated owner can connect.
+Opens real PTY sessions — bash, claude, anything.
 """
 
 import asyncio
@@ -23,7 +22,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import users
 
 log = logging.getLogger("agentstack.web")
@@ -42,8 +40,6 @@ def load_agents() -> dict:
 
 
 class PtySession:
-    """A PTY-backed terminal session for real-time I/O."""
-
     def __init__(self, name: str, cmd: list[str], cwd: str = None, env_extra: dict = None):
         self.name = name
         self.pid = -1
@@ -54,15 +50,12 @@ class PtySession:
         os.makedirs(cwd, exist_ok=True)
 
         env = os.environ.copy()
-        for var in ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_SESSION"):
-            env.pop(var, None)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         if env_extra:
             env.update(env_extra)
 
         self.pid, self.fd = pty.fork()
-
         if self.pid == 0:
             os.chdir(cwd)
             os.execvpe(cmd[0], cmd, env)
@@ -115,8 +108,6 @@ class PtySession:
 
 
 class SessionPool:
-    """Manages PTY sessions across all users."""
-
     def __init__(self):
         self.sessions: dict[str, PtySession] = {}
 
@@ -141,12 +132,11 @@ class SessionPool:
             return True
         return False
 
-    def list_for_user(self, user_id: str) -> list[str]:
-        """Return agent names for a user."""
+    def list_names(self) -> list[str]:
         dead = [k for k, s in self.sessions.items() if not s.is_alive()]
         for k in dead:
             del self.sessions[k]
-        return users.user_sessions(user_id, list(self.sessions.keys()))
+        return list(self.sessions.keys())
 
     def kill_all(self):
         for s in self.sessions.values():
@@ -157,12 +147,16 @@ class SessionPool:
 pool = SessionPool()
 
 
-def build_claude_cmd(name: str, agents: dict) -> tuple[list[str], str]:
-    cfg = agents.get(name, {})
-    cmd = ["claude"]
-    if cfg.get("prompt"):
-        cmd.extend(["--system-prompt", cfg["prompt"]])
-    cwd = cfg.get("cwd", os.path.expanduser("~"))
+def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
+    cfg = agents.get(name)
+    if cfg:
+        cmd = ["claude"]
+        if cfg.get("prompt"):
+            cmd.extend(["--system-prompt", cfg["prompt"]])
+        cwd = cfg.get("cwd", os.path.expanduser("~"))
+    else:
+        cmd = [os.environ.get("SHELL", "/bin/bash")]
+        cwd = os.path.expanduser("~")
     return cmd, cwd
 
 
@@ -185,25 +179,16 @@ async def index():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
-    # Authenticate user via token
-    user_id = users.verify_web_token(token)
-    if not user_id:
+    if not users.verify_web_token(token):
         await websocket.close(code=4001, reason="Unauthorized")
         return
-
-    user = users.get_user(user_id)
-    if not user or not user.get("api_key"):
-        await websocket.close(code=4002, reason="No API key configured")
-        return
-
-    api_key = user["api_key"]
 
     await websocket.accept()
     agents = load_agents()
     attached_session: str | None = None
     reader_task: asyncio.Task | None = None
 
-    async def read_pty(session_key: str, agent_name: str):
+    async def read_pty(session_key: str):
         loop = asyncio.get_event_loop()
         while True:
             session = pool.get(session_key)
@@ -211,8 +196,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                 try:
                     await websocket.send_json({
                         "type": "killed",
-                        "session": agent_name,
-                        "sessions": pool.list_for_user(user_id),
+                        "session": session_key,
+                        "sessions": pool.list_names(),
                     })
                 except Exception:
                     pass
@@ -222,7 +207,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                 if data:
                     await websocket.send_json({
                         "type": "output",
-                        "session": agent_name,
+                        "session": session_key,
                         "data": data.decode("utf-8", errors="replace"),
                     })
             except Exception:
@@ -236,10 +221,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
             msg_type = msg.get("type")
 
             if msg_type == "list_sessions":
-                await websocket.send_json({
-                    "type": "sessions",
-                    "sessions": pool.list_for_user(user_id),
-                })
+                await websocket.send_json({"type": "sessions", "sessions": pool.list_names()})
 
             elif msg_type == "list_agents":
                 agents = load_agents()
@@ -254,58 +236,52 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                     await websocket.send_json({"type": "error", "message": "No session name"})
                     continue
 
-                skey = users.session_key(user_id, name)
                 agents = load_agents()
-                cmd, cwd = build_claude_cmd(name, agents)
+                cmd, cwd = build_session_cmd(name, agents)
 
                 try:
-                    pool.spawn(skey, cmd, cwd, env_extra={"ANTHROPIC_API_KEY": api_key})
+                    pool.spawn(name, cmd, cwd)
                 except Exception as e:
                     await websocket.send_json({"type": "error", "message": str(e)})
                     continue
 
-                attached_session = skey
+                attached_session = name
                 if reader_task:
                     reader_task.cancel()
-                reader_task = asyncio.create_task(read_pty(skey, name))
+                reader_task = asyncio.create_task(read_pty(name))
 
                 await websocket.send_json({
                     "type": "spawned",
                     "session": name,
-                    "sessions": pool.list_for_user(user_id),
+                    "sessions": pool.list_names(),
                 })
 
             elif msg_type == "attach":
                 name = msg.get("session", "")
-                skey = users.session_key(user_id, name)
-                if not pool.get(skey):
+                if not pool.get(name):
                     await websocket.send_json({"type": "error", "message": f"Session '{name}' not found"})
                     continue
-
-                attached_session = skey
+                attached_session = name
                 if reader_task:
                     reader_task.cancel()
-                reader_task = asyncio.create_task(read_pty(skey, name))
+                reader_task = asyncio.create_task(read_pty(name))
 
             elif msg_type == "input":
-                name = msg.get("session", "")
-                skey = users.session_key(user_id, name) if name else attached_session
-                session = pool.get(skey) if skey else None
+                name = msg.get("session", "") or attached_session
+                session = pool.get(name) if name else None
                 if session:
                     session.write(msg.get("data", "").encode("utf-8"))
 
             elif msg_type == "resize":
-                name = msg.get("session", "")
-                skey = users.session_key(user_id, name) if name else attached_session
-                session = pool.get(skey) if skey else None
+                name = msg.get("session", "") or attached_session
+                session = pool.get(name) if name else None
                 if session:
                     session.resize(msg.get("cols", 80), msg.get("rows", 24))
 
             elif msg_type == "kill":
                 name = msg.get("session", "")
-                skey = users.session_key(user_id, name)
-                pool.kill(skey)
-                if attached_session == skey:
+                pool.kill(name)
+                if attached_session == name:
                     attached_session = None
                     if reader_task:
                         reader_task.cancel()
@@ -313,7 +289,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                 await websocket.send_json({
                     "type": "killed",
                     "session": name,
-                    "sessions": pool.list_for_user(user_id),
+                    "sessions": pool.list_names(),
                 })
 
     except WebSocketDisconnect:
@@ -329,11 +305,11 @@ def main():
     import uvicorn
     host = os.getenv("AGENTSTACK_HOST", "0.0.0.0")
     port = int(os.getenv("AGENTSTACK_PORT", "8765"))
-    print("=" * 50)
+    print("=" * 40)
     print("  AgentStack Terminal Server")
-    print("=" * 50)
+    print("=" * 40)
     print(f"  http://{host}:{port}")
-    print(f"  Agents: {len(load_agents())}")
+    print(f"  Owner: {users.OWNER_ID}")
     print()
     uvicorn.run(app, host=host, port=port, log_level="info")
 
