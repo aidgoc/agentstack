@@ -209,6 +209,30 @@
     border-color: var(--red);
   }
 
+  /* Search bar */
+  .search-bar {
+    display: none;
+    padding: 6px 12px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 6px;
+    align-items: center;
+  }
+  .search-bar.show { display: flex; }
+  .search-bar input {
+    flex: 1;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    outline: none;
+  }
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar .btn { padding: 4px 8px; font-size: 11px; min-height: 28px; }
+
   /* Spawn dialog */
   .dialog-overlay {
     display: none;
@@ -311,6 +335,14 @@
   </div>
 </div>
 
+<!-- Search bar (hidden by default) -->
+<div class="search-bar" id="searchBar">
+  <input type="text" id="searchInput" placeholder="Search..." />
+  <button class="btn" onclick="doSearch(-1)">Prev</button>
+  <button class="btn" onclick="doSearch(1)">Next</button>
+  <button class="btn" onclick="closeSearch()">X</button>
+</div>
+
 <!-- Keyboard toolbar -->
 <div class="keyboard-toolbar" id="keyToolbar">
   <!-- Modifier keys (sticky) -->
@@ -326,12 +358,12 @@
     <button class="kbtn" data-send="ctrl-z">C-z</button>
     <button class="kbtn" data-send="ctrl-l">C-l</button>
   </div>
-  <!-- Navigation -->
+  <!-- Navigation (supports long-press repeat) -->
   <div class="kgroup">
-    <button class="kbtn" data-send="up">&#9650;</button>
-    <button class="kbtn" data-send="down">&#9660;</button>
-    <button class="kbtn" data-send="left">&#9664;</button>
-    <button class="kbtn" data-send="right">&#9654;</button>
+    <button class="kbtn" data-send="up" data-repeat="1">&#9650;</button>
+    <button class="kbtn" data-send="down" data-repeat="1">&#9660;</button>
+    <button class="kbtn" data-send="left" data-repeat="1">&#9664;</button>
+    <button class="kbtn" data-send="right" data-repeat="1">&#9654;</button>
   </div>
   <!-- Special keys -->
   <div class="kgroup">
@@ -354,9 +386,10 @@
     <button class="kbtn" data-send="_">_</button>
     <button class="kbtn" data-send="`">`</button>
   </div>
-  <!-- Clipboard -->
+  <!-- Clipboard & Search -->
   <div class="kgroup">
     <button class="kbtn wide" id="pasteBtn">Paste</button>
+    <button class="kbtn wide" id="searchBtn">Find</button>
   </div>
 </div>
 
@@ -378,6 +411,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-serialize@0.13.0/lib/addon-serialize.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.min.js"></script>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script>
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
@@ -385,6 +422,8 @@ const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.
 let ws = null;
 let term = null;
 let fitAddon = null;
+let serializeAddon = null;
+let searchAddon = null;
 let currentSession = null;
 let sessions = [];
 let agents = {};
@@ -392,7 +431,7 @@ let autoSpawned = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 30000;
 
-// Per-session output buffers for tab switching
+// Per-session serialized terminal state (clean, no corruption)
 let sessionBuffers = {};
 // Output batching for smooth rendering
 let pendingOutput = '';
@@ -435,10 +474,21 @@ if (tg) {
 const params = new URLSearchParams(location.search);
 const authToken = params.get('token') || '';
 
+// Detect mobile / Telegram WebApp
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || !!window.Telegram?.WebApp;
+
+// Haptic feedback helper
+function haptic() {
+  if (tg?.HapticFeedback) {
+    tg.HapticFeedback.impactOccurred('light');
+  } else if (navigator.vibrate) {
+    navigator.vibrate(10);
+  }
+}
+
 // ── Keyboard toolbar ──────────────────────────────────
 
 function sendInput(data) {
-  // Direct send for toolbar buttons (bypass debounce for special keys)
   if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
     ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
   }
@@ -452,12 +502,11 @@ function applyModifiers(key) {
   if (ctrlActive && data.length === 1) {
     const upper = data.toUpperCase();
     if (upper >= 'A' && upper <= 'Z') {
-      data = String.fromCharCode(upper.charCodeAt(0) - 64); // Ctrl+letter
+      data = String.fromCharCode(upper.charCodeAt(0) - 64);
     }
   } else if (altActive && data.length === 1) {
-    data = '\x1b' + data; // Alt+key = ESC + key
+    data = '\x1b' + data;
   }
-  // Reset modifiers after use
   if (ctrlActive || altActive || shiftActive) {
     ctrlActive = false;
     altActive = false;
@@ -469,13 +518,24 @@ function applyModifiers(key) {
   return data;
 }
 
-// Bind toolbar buttons
-document.getElementById('keyToolbar').addEventListener('click', (e) => {
+// Long-press key repeat state
+let repeatTimer = null;
+let repeatInterval = null;
+
+function stopRepeat() {
+  clearTimeout(repeatTimer);
+  clearInterval(repeatInterval);
+  repeatTimer = null;
+  repeatInterval = null;
+}
+
+// Bind toolbar buttons using pointer events for long-press support
+document.getElementById('keyToolbar').addEventListener('pointerdown', (e) => {
   const btn = e.target.closest('.kbtn');
   if (!btn) return;
-
   e.preventDefault();
-  e.stopPropagation();
+
+  haptic();
 
   // Sticky modifier toggle
   if (btn.dataset.modifier === 'ctrl') {
@@ -499,10 +559,11 @@ document.getElementById('keyToolbar').addEventListener('click', (e) => {
     return;
   }
 
-  // Send key via key map or literal character
+  // Send key
   if (btn.dataset.send) {
     const seq = KEY_MAP[btn.dataset.send] || btn.dataset.send;
     sendInput(seq);
+
     // Reset modifiers after a key press
     if (ctrlActive || altActive || shiftActive) {
       ctrlActive = false; altActive = false; shiftActive = false;
@@ -510,37 +571,98 @@ document.getElementById('keyToolbar').addEventListener('click', (e) => {
       document.getElementById('modAlt').classList.remove('active');
       document.getElementById('modShift').classList.remove('active');
     }
+
+    // Long-press repeat for navigation keys
+    if (btn.dataset.repeat) {
+      stopRepeat();
+      repeatTimer = setTimeout(() => {
+        repeatInterval = setInterval(() => {
+          sendInput(seq);
+          haptic();
+        }, 80);
+      }, 400);
+    }
+
     term?.focus();
-    return;
   }
 });
 
-// Paste button
-document.getElementById('pasteBtn').addEventListener('click', async (e) => {
+// Stop repeat on pointer up/leave/cancel
+['pointerup', 'pointerleave', 'pointercancel'].forEach(evt => {
+  document.getElementById('keyToolbar').addEventListener(evt, stopRepeat);
+});
+
+// Prevent toolbar from stealing focus
+document.getElementById('keyToolbar').addEventListener('mousedown', (e) => {
   e.preventDefault();
+});
+document.getElementById('keyToolbar').addEventListener('touchstart', (e) => {
+  // Don't preventDefault — it would block pointer events
+}, { passive: true });
+
+// Paste button
+document.getElementById('pasteBtn').addEventListener('pointerdown', async (e) => {
+  e.preventDefault();
+  haptic();
   try {
     const text = await navigator.clipboard.readText();
     if (text) sendInput(text);
   } catch {
-    // Fallback: prompt
     const text = prompt('Paste text:');
     if (text) sendInput(text);
   }
   term?.focus();
 });
 
-// Prevent toolbar buttons from stealing focus from terminal
-document.getElementById('keyToolbar').addEventListener('mousedown', (e) => {
+// Search button
+document.getElementById('searchBtn').addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  haptic();
+  toggleSearch();
 });
-document.getElementById('keyToolbar').addEventListener('touchstart', (e) => {
-  // Don't preventDefault here — it would block the click
-}, { passive: true });
+
+// ── Search ────────────────────────────────────────────
+
+function toggleSearch() {
+  const bar = document.getElementById('searchBar');
+  if (bar.classList.contains('show')) {
+    closeSearch();
+  } else {
+    bar.classList.add('show');
+    document.getElementById('searchInput').focus();
+    doFit();
+  }
+}
+
+function closeSearch() {
+  document.getElementById('searchBar').classList.remove('show');
+  if (searchAddon) searchAddon.clearDecorations();
+  term?.focus();
+  doFit();
+}
+
+function doSearch(direction) {
+  if (!searchAddon) return;
+  const query = document.getElementById('searchInput').value;
+  if (!query) return;
+  if (direction > 0) {
+    searchAddon.findNext(query);
+  } else {
+    searchAddon.findPrevious(query);
+  }
+}
+
+document.getElementById('searchInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    doSearch(e.shiftKey ? -1 : 1);
+    e.preventDefault();
+  } else if (e.key === 'Escape') {
+    closeSearch();
+    e.preventDefault();
+  }
+});
 
 // ── Terminal ──────────────────────────────────────────
-
-// Detect mobile / Telegram WebApp
-const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || !!window.Telegram?.WebApp;
 
 function initTerminal() {
   term = new Terminal({
@@ -572,43 +694,96 @@ function initTerminal() {
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
-    scrollback: 5000,
+    scrollback: 10000,
     allowProposedApi: true,
-    // Reduce GPU overhead on mobile
-    fastScrollModifier: 'none',
     smoothScrollDuration: 0,
   });
 
+  // Core addons
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
 
+  // Serialize addon for clean session buffer snapshots
+  serializeAddon = new SerializeAddon.SerializeAddon();
+  term.loadAddon(serializeAddon);
+
+  // Unicode11 for proper CJK/emoji character widths
+  const unicode11 = new Unicode11Addon.Unicode11Addon();
+  term.loadAddon(unicode11);
+  term.unicode.activeVersion = '11';
+
+  // Search addon
+  searchAddon = new SearchAddon.SearchAddon();
+  term.loadAddon(searchAddon);
+
   const container = document.getElementById('terminal-container');
   term.open(container);
 
-  // Fix double-typing: disable autocorrect/autocomplete on xterm's hidden textarea
+  // WebGL renderer — massive performance boost (fallback to canvas on failure)
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => { webgl.dispose(); });
+    term.loadAddon(webgl);
+  } catch (e) {
+    console.warn('WebGL renderer not available, using canvas fallback:', e);
+  }
+
+  // Fix mobile keyboard: disable autocorrect/autocomplete on xterm's hidden textarea
   const xtermTextarea = container.querySelector('.xterm-helper-textarea');
   if (xtermTextarea) {
     xtermTextarea.setAttribute('autocapitalize', 'off');
     xtermTextarea.setAttribute('autocomplete', 'off');
     xtermTextarea.setAttribute('autocorrect', 'off');
     xtermTextarea.setAttribute('spellcheck', 'false');
+    // 'text' keeps the keyboard visible; 'none' hides it on some Androids
+    // We use 'text' but suppress composition-based double input below
     xtermTextarea.setAttribute('inputmode', 'text');
-    // Prevent composition events from causing double input on mobile
+
+    // Robust composition handling to prevent double-typing
     let composing = false;
-    xtermTextarea.addEventListener('compositionstart', () => { composing = true; });
-    xtermTextarea.addEventListener('compositionend', () => {
-      // Small delay to let xterm process the composed text
-      setTimeout(() => { composing = false; }, 50);
+    let lastComposedData = '';
+
+    xtermTextarea.addEventListener('compositionstart', () => {
+      composing = true;
+      lastComposedData = '';
+    });
+
+    xtermTextarea.addEventListener('compositionupdate', (e) => {
+      lastComposedData = e.data || '';
+    });
+
+    xtermTextarea.addEventListener('compositionend', (e) => {
+      composing = false;
+      // Clear the textarea to prevent xterm from processing stale composed text
+      setTimeout(() => {
+        lastComposedData = '';
+      }, 100);
+    });
+
+    // Intercept beforeinput to suppress duplicate insertions during composition
+    xtermTextarea.addEventListener('beforeinput', (e) => {
+      if (composing && e.inputType === 'insertComposition') {
+        // Let xterm handle the compositionend event instead
+        return;
+      }
     });
   }
 
   fitAddon.fit();
 
-  // Debounced input sender to prevent duplicate sends
+  // Copy on selection (mobile + desktop)
+  term.onSelectionChange(() => {
+    const sel = term.getSelection();
+    if (sel && sel.length > 0) {
+      navigator.clipboard.writeText(sel).catch(() => {});
+    }
+  });
+
+  // Input sender with minimal batching
   let inputQueue = '';
   let inputTimer = null;
-  const INPUT_DELAY = isMobile ? 16 : 4; // ms
+  const INPUT_DELAY = isMobile ? 12 : 4;
 
   function flushInput() {
     if (inputQueue && ws && ws.readyState === WebSocket.OPEN && currentSession) {
@@ -638,26 +813,38 @@ function initTerminal() {
   });
 
   // Handle window resize
-  let fitTimer = null;
-  const doFit = () => {
-    clearTimeout(fitTimer);
-    fitTimer = setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 50);
-  };
   window.addEventListener('resize', doFit);
 
-  // Mobile keyboard resize handling
+  // Mobile keyboard resize handling with proper debounce
   if (window.visualViewport) {
+    let vpResizeTimer = null;
     window.visualViewport.addEventListener('resize', () => {
-      const cont = document.getElementById('terminal-container');
-      const topbar = document.querySelector('.topbar');
-      const sessbar = document.getElementById('sessionsBar');
-      const toolbar = document.getElementById('keyToolbar');
-      const statusbar = document.querySelector('.statusbar');
-      const usedHeight = topbar.offsetHeight + sessbar.offsetHeight + toolbar.offsetHeight + statusbar.offsetHeight;
-      cont.style.height = (window.visualViewport.height - usedHeight) + 'px';
-      doFit();
+      clearTimeout(vpResizeTimer);
+      vpResizeTimer = setTimeout(() => {
+        const cont = document.getElementById('terminal-container');
+        const topbar = document.querySelector('.topbar');
+        const sessbar = document.getElementById('sessionsBar');
+        const toolbar = document.getElementById('keyToolbar');
+        const statusbar = document.querySelector('.statusbar');
+        const searchbar = document.getElementById('searchBar');
+        const usedHeight = topbar.offsetHeight + sessbar.offsetHeight +
+          toolbar.offsetHeight + statusbar.offsetHeight + searchbar.offsetHeight;
+        cont.style.height = (window.visualViewport.height - usedHeight) + 'px';
+        doFit();
+      }, 150);
     });
   }
+}
+
+// Debounced fit
+let fitTimer = null;
+function doFit() {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    if (fitAddon) {
+      try { fitAddon.fit(); } catch {}
+    }
+  }, 50);
 }
 
 // ── WebSocket ─────────────────────────────────────────
@@ -666,7 +853,6 @@ function connect() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    // Send auth as first message (token not in URL for security)
     ws.send(JSON.stringify({ type: 'auth', token: authToken }));
     document.getElementById('statusDot').classList.add('connected');
     document.getElementById('statusText').textContent = 'Connected';
@@ -680,14 +866,14 @@ function connect() {
 
     switch (msg.type) {
       case 'output':
-        // Buffer output per session
+        // Store raw output per session for live accumulation
         if (!sessionBuffers[msg.session]) sessionBuffers[msg.session] = '';
         sessionBuffers[msg.session] += msg.data;
-        if (sessionBuffers[msg.session].length > 100000) {
-          sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-60000);
+        // Trim raw buffer to prevent memory bloat (serialize on switch is cleaner)
+        if (sessionBuffers[msg.session].length > 200000) {
+          sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-120000);
         }
         if (msg.session === currentSession && term) {
-          // Batch terminal writes using requestAnimationFrame
           if (!pendingOutput) pendingOutput = '';
           pendingOutput += msg.data;
           if (!outputRaf) {
@@ -741,6 +927,19 @@ function connect() {
         renderSessions();
         break;
 
+      case 'replay':
+        // Server sends replay data on re-attach
+        if (msg.session === currentSession && term && msg.data) {
+          term.write(msg.data);
+        }
+        break;
+
+      case 'ping':
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        break;
+
       case 'error':
         if (term) term.write('\r\n\x1b[31m' + msg.message + '\x1b[0m\r\n');
         break;
@@ -780,6 +979,15 @@ function renderSessions() {
 }
 
 function switchToSession(name) {
+  // Save current session's terminal state via serialize (clean snapshot)
+  if (currentSession && term && serializeAddon && currentSession !== name) {
+    try {
+      sessionBuffers[currentSession] = serializeAddon.serialize();
+    } catch {
+      // Keep raw buffer as fallback
+    }
+  }
+
   currentSession = name;
   document.getElementById('currentAgent').textContent = name;
   document.getElementById('killBtn').style.display = '';

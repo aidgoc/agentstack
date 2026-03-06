@@ -17,6 +17,7 @@ import struct
 import sys
 import fcntl
 import termios
+import threading
 import time
 from pathlib import Path
 
@@ -64,6 +65,9 @@ def _sanitize_name(name: str) -> str:
 app = FastAPI(title="AgentStack Terminal")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
+# Replay buffer size per session (last 32KB of output for reconnect)
+REPLAY_BUFFER_SIZE = 32768
+
 
 class PtySession:
     def __init__(self, name: str, cmd: list[str], cwd: str = None, env_extra: dict = None):
@@ -71,6 +75,7 @@ class PtySession:
         self.pid = -1
         self.fd = -1
         self._alive = False
+        self.replay_buffer = bytearray()
 
         cwd = cwd or os.path.expanduser("~")
         os.makedirs(cwd, exist_ok=True)
@@ -92,6 +97,16 @@ class PtySession:
             flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
             fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
             log.info("PTY '%s' started (pid=%d)", name, self.pid)
+
+    def append_replay(self, data: bytes):
+        """Append output data to the replay buffer, trimming to max size."""
+        self.replay_buffer.extend(data)
+        if len(self.replay_buffer) > REPLAY_BUFFER_SIZE:
+            self.replay_buffer = self.replay_buffer[-REPLAY_BUFFER_SIZE:]
+
+    def get_replay(self) -> str:
+        """Get replay buffer as string for client reconnect."""
+        return self.replay_buffer.decode("utf-8", errors="replace")
 
     def resize(self, cols: int, rows: int):
         if self.fd >= 0:
@@ -129,7 +144,19 @@ class PtySession:
         if self.pid > 0:
             try:
                 os.kill(self.pid, signal.SIGTERM)
-                os.waitpid(self.pid, os.WNOHANG)
+                # Wait up to 3 seconds for graceful shutdown
+                for _ in range(30):
+                    pid, _ = os.waitpid(self.pid, os.WNOHANG)
+                    if pid != 0:
+                        break
+                    time.sleep(0.1)
+                else:
+                    # Force kill if SIGTERM didn't work
+                    try:
+                        os.kill(self.pid, signal.SIGKILL)
+                        os.waitpid(self.pid, 0)
+                    except (OSError, ChildProcessError):
+                        pass
             except (OSError, ChildProcessError):
                 pass
         log.info("PTY '%s' killed", self.name)
@@ -235,7 +262,7 @@ async def _reap_loop():
     """Periodically reap dead sessions to avoid zombie processes."""
     while True:
         pool.list_names()
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)
 
 
 # ── Routes ────────────────────────────────────────────
@@ -272,9 +299,10 @@ async def websocket_endpoint(websocket: WebSocket):
     agents = load_agents()
     attached_session: str | None = None
     reader_task: asyncio.Task | None = None
+    ping_task: asyncio.Task | None = None
 
     async def read_pty(session_key: str):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             session = pool.get(session_key)
             if not session:
@@ -290,6 +318,8 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 data = await loop.run_in_executor(None, _blocking_read, session.fd)
                 if data:
+                    # Store in replay buffer for reconnect
+                    session.append_replay(data)
                     await websocket.send_json({
                         "type": "output",
                         "session": session_key,
@@ -298,13 +328,32 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception:
                 break
 
+    async def ping_loop():
+        """Send ping every 25 seconds to detect dead connections."""
+        try:
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    # Start ping keepalive
+    ping_task = asyncio.create_task(ping_loop())
+
     try:
         while True:
             raw = await websocket.receive_text()
             msg = json.loads(raw)
             msg_type = msg.get("type")
 
-            if msg_type == "list_sessions":
+            if msg_type == "pong":
+                # Client responded to our ping — connection is alive
+                continue
+
+            elif msg_type == "list_sessions":
                 await websocket.send_json({"type": "sessions", "sessions": pool.list_names()})
 
             elif msg_type == "list_agents":
@@ -342,13 +391,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "attach":
                 name = msg.get("session", "")
-                if not pool.get(name):
+                session = pool.get(name)
+                if not session:
                     await websocket.send_json({"type": "error", "message": f"Session '{name}' not found"})
                     continue
                 attached_session = name
                 if reader_task:
                     reader_task.cancel()
                 reader_task = asyncio.create_task(read_pty(name))
+
+                # Send replay buffer so client has terminal state on reconnect
+                replay = session.get_replay()
+                if replay:
+                    await websocket.send_json({
+                        "type": "replay",
+                        "session": name,
+                        "data": replay,
+                    })
 
             elif msg_type == "input":
                 name = msg.get("session", "") or attached_session
@@ -383,6 +442,8 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if reader_task:
             reader_task.cancel()
+        if ping_task:
+            ping_task.cancel()
 
 
 def main():

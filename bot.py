@@ -118,7 +118,7 @@ class AgentStackBot:
             return
 
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self._run_sh, cmd_text)
         for chunk in self._split(result):
             await update.message.reply_text(f"```\n{chunk}\n```", parse_mode="Markdown")
