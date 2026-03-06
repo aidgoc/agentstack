@@ -338,6 +338,10 @@ def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
         cmd = ["claude"]
         if cfg.get("prompt"):
             cmd.extend(["--system-prompt", cfg["prompt"]])
+        if cfg.get("mcp_config"):
+            mcp_path = cfg["mcp_config"]
+            if os.path.exists(mcp_path):
+                cmd.extend(["--mcp-config", mcp_path])
         cwd = cfg.get("cwd", os.path.expanduser("~"))
     else:
         default_shell = "/bin/zsh" if platform.system() == "Darwin" else "/bin/bash"

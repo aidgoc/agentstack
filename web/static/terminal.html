@@ -682,7 +682,7 @@ function initTerminal() {
     console.warn('WebGL not available:', e);
   }
 
-  // Fix mobile keyboard
+  // Fix mobile keyboard: suppress autocorrect without interfering with xterm's input handling
   const xtermTextarea = termContainer.querySelector('.xterm-helper-textarea');
   if (xtermTextarea) {
     xtermTextarea.setAttribute('autocapitalize', 'off');
@@ -690,29 +690,6 @@ function initTerminal() {
     xtermTextarea.setAttribute('autocorrect', 'off');
     xtermTextarea.setAttribute('spellcheck', 'false');
     xtermTextarea.setAttribute('inputmode', 'text');
-    xtermTextarea.setAttribute('enterkeyhint', 'send');
-
-    // Aggressive composition fix
-    let composing = false;
-    xtermTextarea.addEventListener('compositionstart', () => { composing = true; });
-    xtermTextarea.addEventListener('compositionend', () => {
-      composing = false;
-      // Force-clear textarea to prevent xterm from re-processing stale text
-      requestAnimationFrame(() => {
-        if (xtermTextarea.value) xtermTextarea.value = '';
-      });
-    });
-
-    // MutationObserver to auto-clean stale textarea content
-    // This catches edge cases where composition leaves behind text
-    const observer = new MutationObserver(() => {
-      if (!composing && xtermTextarea.value.length > 1) {
-        requestAnimationFrame(() => {
-          if (!composing) xtermTextarea.value = '';
-        });
-      }
-    });
-    observer.observe(xtermTextarea, { attributes: true, childList: true, characterData: true });
   }
 
   fitAddon.fit();
