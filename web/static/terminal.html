@@ -377,6 +377,20 @@ const MAX_RECONNECT_DELAY = 15000;
 let sessionBuffers = {};
 let pendingOutput = '';
 let outputRaf = null;
+let sessionStartTime = 0;
+
+// Strip Device Attribute responses that leak as visible text on session start
+// Matches: \x1b[?N;N;Nc and bare fragments like "1;2c" or "0;276;0c"
+const DA_RE = /\x1b\[\?[0-9;]*c/g;
+const BARE_DA_RE = /[0-9]+(?:;[0-9]+)*c/g;
+function stripDA(str, elapsed) {
+  str = str.replace(DA_RE, '');
+  // Only strip bare fragments in the first 2 seconds (they're DA response fragments)
+  if (elapsed < 2000) {
+    str = str.replace(BARE_DA_RE, '');
+  }
+  return str;
+}
 
 // Sticky modifiers
 let ctrlActive = false, altActive = false, shiftActive = false;
@@ -824,12 +838,15 @@ function connect() {
     switch (msg.type) {
       case 'output':
         if (!sessionBuffers[msg.session]) sessionBuffers[msg.session] = '';
-        sessionBuffers[msg.session] += msg.data;
+        // Strip DA responses that leak as visible ghost text
+        const elapsed = Date.now() - sessionStartTime;
+        const cleanData = stripDA(msg.data, elapsed);
+        sessionBuffers[msg.session] += cleanData;
         if (sessionBuffers[msg.session].length > 200000) {
           sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-120000);
         }
         if (msg.session === currentSession && term) {
-          pendingOutput += msg.data;
+          pendingOutput += cleanData;
           if (!outputRaf) {
             outputRaf = requestAnimationFrame(() => {
               if (pendingOutput && term) {
@@ -863,6 +880,7 @@ function connect() {
       case 'spawned':
         currentSession = msg.session;
         previousSession = msg.session;
+        sessionStartTime = Date.now();
         sessions = msg.sessions || sessions;
         sessionBuffers[msg.session] = '';
         renderSessions();
@@ -946,6 +964,7 @@ function switchToSession(name) {
   }
   currentSession = name;
   previousSession = name;
+  sessionStartTime = Date.now();
   document.getElementById('currentAgent').textContent = name;
   document.getElementById('killBtn').style.display = '';
   document.getElementById('sessionEnded').classList.remove('show');

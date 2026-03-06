@@ -12,6 +12,7 @@ import platform
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import struct
@@ -116,8 +117,8 @@ def tmux_create_session(name: str, cmd: list[str], cwd: str, env_extra: dict = N
     if env_extra:
         env.update(env_extra)
 
-    # Build the shell command string
-    shell_cmd = " ".join(cmd)
+    # Build the shell command string with proper quoting
+    shell_cmd = shlex.join(cmd)
 
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", sess, "-x", "120", "-y", "35", shell_cmd],
@@ -350,6 +351,9 @@ def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
     return cmd, cwd
 
 
+# Match Device Attribute responses: \x1b[?N;N;Nc
+_DA_RESPONSE_RE = re.compile(rb'\x1b\[\?[0-9;]*c')
+
 def _blocking_read(fd: int) -> bytes:
     """Read from PTY fd with batching — collect available data up to 64KB."""
     if fd < 0:
@@ -372,7 +376,10 @@ def _blocking_read(fd: int) -> bytes:
                     break
             except (OSError, BlockingIOError):
                 break
-        return b"".join(chunks)
+        data = b"".join(chunks)
+        # Strip Device Attribute responses that leak as visible text
+        data = _DA_RESPONSE_RE.sub(b'', data)
+        return data
     except (OSError, ValueError):
         pass
     return b""
