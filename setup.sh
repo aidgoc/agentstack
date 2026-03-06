@@ -20,14 +20,29 @@ install_deps() {
         command -v cloudflared &>/dev/null || brew install cloudflare/cloudflare/cloudflared
         command -v python3 &>/dev/null    || brew install python
         command -v node &>/dev/null       || brew install node
+        command -v tmux &>/dev/null       || brew install tmux
         command -v claude &>/dev/null     || npm install -g @anthropic-ai/claude-code
     else
         # Linux
+        PKGS=""
+        command -v tmux &>/dev/null || PKGS="$PKGS tmux"
+        command -v curl &>/dev/null || PKGS="$PKGS curl"
+        if [ -n "$PKGS" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq $PKGS >/dev/null 2>&1
+        fi
         if ! command -v cloudflared &>/dev/null; then
-            curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            ARCH=$(uname -m)
+            case "$ARCH" in
+                x86_64|amd64)   CF_ARCH="amd64" ;;
+                aarch64|arm64)  CF_ARCH="arm64" ;;
+                armv7l|armhf)   CF_ARCH="arm" ;;
+                *)              CF_ARCH="amd64" ;;
+            esac
+            curl -sL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
                 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && sudo mv /tmp/cloudflared /usr/local/bin/
         fi
-        command -v claude &>/dev/null || npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+        command -v claude &>/dev/null || npm install -g @anthropic-ai/claude-code 2>/dev/null || \
+            sudo npm install -g @anthropic-ai/claude-code 2>/dev/null || true
     fi
 
     # Python venv

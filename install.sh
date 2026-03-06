@@ -18,9 +18,10 @@ echo "  ║   Your terminal, from Telegram   ║"
 echo "  ╚══════════════════════════════════╝"
 echo ""
 
-# ── Pre-flight ───────────────────────────────────────
+# ── Detect platform & architecture ───────────────────
 if [[ "$OSTYPE" == "darwin"* ]]; then
     PLATFORM="mac"
+    ARCH=$(uname -m)  # arm64 or x86_64
     if ! command -v brew &>/dev/null; then
         echo "Installing Homebrew..."
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -31,11 +32,15 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     PLATFORM="linux"
+    ARCH=$(uname -m)  # x86_64, aarch64, armv7l
 else
     echo "Unsupported platform: $OSTYPE"
     echo "AgentStack supports macOS and Linux."
     exit 1
 fi
+
+echo "  Platform: $PLATFORM ($ARCH)"
+echo ""
 
 # ── Install dependencies ────────────────────────────
 echo "[1/5] Installing dependencies..."
@@ -44,20 +49,38 @@ if [ "$PLATFORM" = "mac" ]; then
     command -v git &>/dev/null         || brew install git
     command -v python3 &>/dev/null     || brew install python
     command -v node &>/dev/null        || brew install node
+    command -v tmux &>/dev/null        || brew install tmux
     command -v cloudflared &>/dev/null || brew install cloudflare/cloudflare/cloudflared
 else
-    # Linux
-    if ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
+    # Linux — install system packages
+    NEED_APT=false
+    PKGS=""
+    command -v git &>/dev/null      || { NEED_APT=true; PKGS="$PKGS git"; }
+    command -v python3 &>/dev/null  || { NEED_APT=true; PKGS="$PKGS python3 python3-venv"; }
+    command -v tmux &>/dev/null     || { NEED_APT=true; PKGS="$PKGS tmux"; }
+    command -v curl &>/dev/null     || { NEED_APT=true; PKGS="$PKGS curl"; }
+
+    if [ "$NEED_APT" = true ]; then
         sudo apt-get update -qq
-        sudo apt-get install -y -qq git python3 python3-venv curl >/dev/null 2>&1
+        sudo apt-get install -y -qq $PKGS >/dev/null 2>&1
     fi
+
+    # Node.js
     if ! command -v node &>/dev/null; then
         curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
         sudo apt-get install -y -qq nodejs >/dev/null 2>&1
     fi
+
+    # cloudflared — detect architecture
     if ! command -v cloudflared &>/dev/null; then
         echo "  Installing cloudflared..."
-        curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+        case "$ARCH" in
+            x86_64|amd64)   CF_ARCH="amd64" ;;
+            aarch64|arm64)  CF_ARCH="arm64" ;;
+            armv7l|armhf)   CF_ARCH="arm" ;;
+            *)              CF_ARCH="amd64" ;;
+        esac
+        curl -sL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
             -o /tmp/cloudflared && chmod +x /tmp/cloudflared && sudo mv /tmp/cloudflared /usr/local/bin/
     fi
 fi
@@ -70,8 +93,21 @@ if command -v claude &>/dev/null; then
     echo "  Already installed"
 else
     echo "  Installing..."
-    npm install -g @anthropic-ai/claude-code 2>/dev/null
-    echo "  OK"
+    if [ "$PLATFORM" = "linux" ]; then
+        # Try without sudo first, fall back to sudo
+        npm install -g @anthropic-ai/claude-code 2>/dev/null || \
+        sudo npm install -g @anthropic-ai/claude-code 2>/dev/null || \
+        { echo "  WARN: Could not install Claude Code globally. Trying npx fallback..."; }
+    else
+        npm install -g @anthropic-ai/claude-code 2>/dev/null
+    fi
+
+    if command -v claude &>/dev/null; then
+        echo "  OK"
+    else
+        echo "  WARN: 'claude' not in PATH. You can run: npx @anthropic-ai/claude-code"
+        echo "        Or fix with: sudo npm install -g @anthropic-ai/claude-code"
+    fi
 fi
 
 # ── Clone / update repo ─────────────────────────────
@@ -179,6 +215,10 @@ echo "  View logs:     agentstack logs"
 echo "  Update:        agentstack update"
 echo ""
 echo "  Installed to:  $INSTALL_DIR"
+echo ""
+echo "  Note: If you haven't logged into Claude Code yet,"
+echo "  open a terminal and run: claude"
+echo "  It will open your browser to sign in with your Anthropic account."
 echo ""
 
 read -p "  Start AgentStack now? [Y/n] " START_NOW
