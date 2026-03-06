@@ -1,201 +1,181 @@
 # AgentStack
 
-Multi-agent Claude Code manager via Telegram. Spawn, control, and switch between multiple Claude Code instances from your phone — each one is a full AI agent.
+Run multiple Claude Code AI agents from Telegram. Any user connects, brings their own Anthropic API key, and gets unlimited Claude Code instances — each one is a full AI agent that can code, research, write, and more.
 
-## What it does
+## How it works
 
-- **Spawn named agents** from Telegram — each runs Claude Code in its own terminal session
-- **Full terminal UI** inside Telegram via Mini App (xterm.js with colors, cursor, scrollback)
-- **Switch between agents** with tabs — run a researcher, copywriter, and developer in parallel
-- **Text commands** as fallback — `/spawn`, `/to`, `/broadcast` work without the Mini App
-- **Auto-tunnel** — Cloudflare tunnel URL is detected and configured automatically on every restart
-
-## Architecture
+1. User opens the Telegram bot and sends `/start`
+2. User provides their Anthropic API key via `/key sk-ant-...`  (auto-deleted for security)
+3. User taps **"Open Terminal"** — a full xterm.js terminal appears inside Telegram
+4. User spawns agents (researcher, copywriter, developer, or custom) — each is a Claude Code instance
+5. Switch between agents with tabs. All sessions are isolated per user.
 
 ```
-Telegram  ──→  Bot (python-telegram-bot)
-                 │
-                 ├── Text commands (/spawn, /to, /broadcast)
-                 │
-                 └── Mini App button ──→  Web Server (FastAPI + WebSocket)
-                                              │
-                                              ├── xterm.js terminal in browser
-                                              │
-                                              └── PTY sessions (one per agent)
-                                                    │
-                                                    └── Claude Code CLI
+User A (phone)  ──→  Telegram Bot  ──→  WebSocket Server  ──→  PTY: claude (user A's key)
+User B (phone)  ──→       │        ──→       │             ──→  PTY: claude (user B's key)
+                          │                  │
+                     Auth + routing      Per-user isolation
 ```
 
-Each agent is a Claude Code instance running in a PTY. The web server bridges WebSocket connections from the Mini App to PTY file descriptors for real-time terminal I/O.
+Each user's agents run with **their own API key**. The server operator pays nothing for AI usage — each user pays their own Anthropic bill.
 
 ## Quick Start
 
 ### Prerequisites
 
-| Tool | Install (Mac) | Install (Linux) |
-|------|--------------|-----------------|
+| Tool | Mac | Linux |
+|------|-----|-------|
 | Python 3.10+ | `brew install python` | Pre-installed |
 | tmux | `brew install tmux` | `sudo apt install tmux` |
-| cloudflared | `brew install cloudflared` | [See docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) |
+| cloudflared | `brew install cloudflared` | [Download](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | Same |
 
 ### Setup
 
 ```bash
-# Clone
 git clone https://github.com/aidgoc/agentstack.git
 cd agentstack
-
-# Configure
 cp .env.example .env
-# Edit .env — add your Telegram bot token and user ID
-
-# Install Python deps
+nano .env   # add TELEGRAM_BOT_TOKEN
 pip install -r requirements.txt
-
-# Run
 bash start.sh
 ```
 
 ### Create a Telegram Bot
 
-1. Open [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot`, follow prompts
-3. Copy the token to `TELEGRAM_BOT_TOKEN` in `.env`
-4. Get your user ID: send a message to [@userinfobot](https://t.me/userinfobot)
-5. Add your ID to `TELEGRAM_ALLOWED_USERS` in `.env`
+1. Open [@BotFather](https://t.me/BotFather) → `/newbot`
+2. Copy token to `TELEGRAM_BOT_TOKEN` in `.env`
+3. Optionally add your Telegram user ID to `TELEGRAM_ADMIN_USERS` for admin commands
 
 ### Run on Mac
 
 ```bash
-# Install everything
 brew install tmux cloudflared python
 npm install -g @anthropic-ai/claude-code
-
-# Clone and configure
 git clone https://github.com/aidgoc/agentstack.git
 cd agentstack
 cp .env.example .env
-nano .env  # add your tokens
-
-# Install and run
+nano .env
 pip3 install -r requirements.txt
 bash start.sh
 ```
 
-That's it. Open Telegram, tap the "Terminal" button in the bot chat.
-
 ### Run with Docker
 
 ```bash
-# Clone and configure
 git clone https://github.com/aidgoc/agentstack.git
 cd agentstack
 cp .env.example .env
-nano .env  # add your tokens
-
-# Run
+nano .env
 docker compose up -d
-
-# View logs
 docker compose logs -f
 ```
 
-Note: Claude Code CLI needs to be authenticated. Mount your `~/.claude` directory (already configured in `docker-compose.yml`).
+## User Flow
 
-## Usage
+### For end users (your clients)
 
-### Mini App (recommended)
+1. Open bot in Telegram → `/start`
+2. Set API key: `/key sk-ant-api03-...`
+3. Tap **"Open Terminal"** or `/terminal`
+4. Spawn agents from the UI or via `/spawn dev`
+5. Type to your agents. Switch between them with tabs.
 
-1. Open bot in Telegram
-2. Tap **"Terminal"** button (bottom of chat)
-3. Tap **"+ Spawn"** → pick an agent preset
-4. Full terminal appears — type directly to Claude Code
-5. Switch agents using tabs at the top
-
-### Text Commands
+### Text commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Show help + Mini App button |
-| `/terminal` | Open Mini App |
-| `/spawn <name>` | Start an agent (opens terminal on desktop too) |
+| `/start` | Onboarding + help |
+| `/key <api_key>` | Set Anthropic API key |
+| `/terminal` | Open Mini App terminal |
+| `/spawn <name>` | Start an agent |
 | `/kill <name>` | Kill an agent |
-| `/sessions` | List active agents |
-| `/use <name>` | Switch active agent for text mode |
-| `/to <name> <msg>` | Send message to specific agent |
-| `/broadcast <msg>` | Message ALL active agents |
-| `/sh <cmd>` | Run a shell command |
-| `/killall` | Kill all agents |
-| `/agents` | List presets |
+| `/sessions` | List your agents |
+| `/use <name>` | Switch active agent |
+| `/to <name> <msg>` | Message specific agent |
+| `/broadcast <msg>` | Message all agents |
+| `/killall` | Kill all your agents |
+| `/logout` | Remove key + kill sessions |
+
+### Admin commands
+
+| Command | Description |
+|---------|-------------|
+| `/admin` | List all users and sessions |
+| `/sh <cmd>` | Run shell command |
 | `/reload` | Reload agents.json |
-
-### Terminal Shortcuts (text mode)
-
-| Shortcut | Key |
-|----------|-----|
-| `/cc` | Ctrl+C |
-| `/cd` | Ctrl+D |
-| `/up` `/down` | Arrow keys |
-| `/enter` | Enter |
-| `/tab` | Tab |
-| `/y` `/n` | yes / no + Enter |
-| `/esc` | Escape |
 
 ## Agent Presets
 
-Configured in `agents.json`. Each preset defines a name, system prompt, and working directory:
+Defined in `agents.json`:
 
 ```json
 {
   "agents": {
     "atlas": {
       "description": "Deep research analyst",
-      "prompt": "You are Atlas, a deep research analyst...",
-      "cwd": "/path/to/research"
+      "prompt": "You are Atlas, a research analyst...",
+      "cwd": "~/research"
     },
-    "scribe": {
-      "description": "Copywriter",
-      "prompt": "You are Scribe, a copywriter...",
-      "cwd": "/path/to/drafts"
+    "dev": {
+      "description": "Senior developer",
+      "prompt": "You are a senior developer...",
+      "cwd": "~"
     }
   }
 }
 ```
 
-Default presets: **atlas** (research), **scribe** (copywriter), **trendy** (trend scout), **crm** (CRM), **dev** (developer).
+Users can spawn presets or any custom name. Custom names get a plain Claude Code instance.
 
-Edit `agents.json` to add your own. Run `/reload` in Telegram to pick up changes.
-
-## How It Works
-
-1. `start.sh` launches the web server, cloudflared tunnel, and Telegram bot
-2. Cloudflared generates a random HTTPS URL (changes on restart)
-3. The script parses this URL and:
-   - Updates `.env` with the new `AGENTSTACK_WEBAPP_URL`
-   - Sets the Telegram bot's menu button via API
-4. Bot reads the URL from env and serves Mini App buttons
-5. Mini App connects via WebSocket to the web server
-6. Web server spawns PTY processes running Claude Code
-7. Real-time I/O flows: xterm.js ↔ WebSocket ↔ PTY ↔ Claude Code
-
-## Files
+## Architecture
 
 ```
 agentstack/
-├── start.sh           # One-command launcher (web + tunnel + bot)
-├── bot.py             # Telegram bot with all commands
-├── terminal.py        # Tmux session manager (text mode fallback)
+├── start.sh           # One-command launcher
+├── bot.py             # Multi-user Telegram bot
+├── users.py           # User DB (SQLite) + auth tokens
+├── terminal.py        # Tmux session manager (text mode)
 ├── web/
-│   ├── server.py      # FastAPI + WebSocket + PTY bridge
+│   ├── server.py      # FastAPI + WebSocket + PTY (Mini App)
 │   └── static/
-│       └── terminal.html  # xterm.js Mini App UI
-├── agents.json        # Agent presets (name, prompt, cwd)
-├── .env.example       # Configuration template
+│       └── terminal.html  # xterm.js terminal UI
+├── agents.json        # Agent presets
+├── data/              # SQLite DB (auto-created, gitignored)
+├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
 ```
+
+### Multi-user isolation
+
+- Sessions are keyed as `user_id:agent_name` — no cross-user access
+- Each PTY process gets the user's own `ANTHROPIC_API_KEY` in its environment
+- Web tokens are HMAC-signed per user
+- Rate limiting per user
+- Configurable session limit per user (`MAX_SESSIONS_PER_USER`)
+
+### Auto-tunnel
+
+`start.sh` handles the cloudflared tunnel automatically:
+1. Starts web server
+2. Starts cloudflared → parses the HTTPS URL
+3. Updates `.env` with new URL
+4. Sets Telegram bot menu button via API
+5. Starts bot
+
+New URL is configured automatically on every restart.
+
+## Configuration
+
+| Env Var | Description | Default |
+|---------|-------------|---------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather | Required |
+| `TELEGRAM_ADMIN_USERS` | Comma-separated admin user IDs | None |
+| `MAX_SESSIONS_PER_USER` | Max concurrent agents per user | 10 |
+| `AGENTSTACK_PORT` | Web server port | 8765 |
+| `AGENTSTACK_WEBAPP_URL` | Auto-set by start.sh | Auto |
 
 ## License
 

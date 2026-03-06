@@ -68,7 +68,7 @@ class TmuxSession:
         self._reader: Optional[threading.Thread] = None
         self._window_proc: Optional[subprocess.Popen] = None
 
-    def spawn(self, cmd: list[str], cwd: str = None, open_window: bool = True):
+    def spawn(self, cmd: list[str], cwd: str = None, open_window: bool = True, env_override: dict = None):
         cwd = cwd or os.path.expanduser("~")
         shell_cmd = " ".join(cmd)
 
@@ -79,6 +79,10 @@ class TmuxSession:
         clean_env = os.environ.copy()
         for var in ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_SESSION"):
             clean_env.pop(var, None)
+
+        # Apply per-user env overrides (e.g., ANTHROPIC_API_KEY)
+        if env_override:
+            clean_env.update(env_override)
 
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", self.tmux_name, "-x", "120", "-y", "30", shell_cmd],
@@ -203,12 +207,13 @@ class SessionManager:
         self._streamers: dict[str, threading.Thread] = {}
 
     def create(self, name: str, cmd: list[str], cwd: str = None,
-               on_output: Callable[[str, str], None] = None) -> TmuxSession:
+               on_output: Callable[[str, str], None] = None,
+               env_override: dict = None) -> TmuxSession:
         with self._lock:
             if name in self._sessions:
                 self._sessions[name].kill()
             session = TmuxSession(name)
-            session.spawn(cmd, cwd=cwd)
+            session.spawn(cmd, cwd=cwd, env_override=env_override)
             self._sessions[name] = session
 
         if on_output:

@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-AgentStack - Multi-agent Claude Code manager via Telegram.
+AgentStack - Multi-user, multi-agent Claude Code manager via Telegram.
 
-Two modes of interaction:
-1. Mini App (/terminal) - Full xterm.js terminal in Telegram WebApp
-2. Text commands - Fallback for quick operations
+Any user can connect, provide their own Anthropic API key, and spawn
+unlimited Claude Code agents. Each user's sessions are fully isolated.
 
 Commands:
-  /start, /help        - Show help
-  /terminal            - Open the terminal Mini App
-  /agents              - List available agent presets
+  /start               - Onboarding + help
+  /terminal            - Open the full terminal Mini App
+  /key <api_key>       - Set your Anthropic API key
+  /agents              - List agent presets
   /spawn <name>        - Start a Claude Code agent
-  /kill <name>         - Kill an agent session
-  /sessions            - List active sessions
-  /to <name> <msg>     - Send a message to a specific agent
+  /kill <name>         - Kill an agent
+  /sessions            - List your active sessions
+  /to <name> <msg>     - Message a specific agent
   /use <name>          - Switch active agent (text mode)
-  /sh <cmd>            - Run a one-shot shell command
-  /broadcast <msg>     - Send a message to ALL active agents
-  /killall             - Kill all agent sessions
+  /broadcast <msg>     - Message all your agents
+  /killall             - Kill all your agents
+  /sh <cmd>            - Run a shell command
+  /logout              - Remove your API key and kill sessions
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -36,6 +35,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
+import users
 from terminal import SessionManager
 
 logging.basicConfig(
@@ -48,8 +48,9 @@ BOT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 AGENTS_FILE = BOT_DIR / "agents.json"
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ALLOWED_USERS = [s.strip() for s in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",") if s.strip()]
-WEBAPP_URL = os.getenv("AGENTSTACK_WEBAPP_URL", "")  # Set after tunnel is up
+ADMIN_USERS = [s.strip() for s in os.getenv("TELEGRAM_ADMIN_USERS", "").split(",") if s.strip()]
+WEBAPP_URL = os.getenv("AGENTSTACK_WEBAPP_URL", "")
+MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "10"))
 
 MAX_MSG_LEN = 4000
 RATE_LIMIT = 25
@@ -60,7 +61,7 @@ class AgentStackBot:
     def __init__(self):
         self.sessions = SessionManager()
         self.agents = self._load_agents()
-        self.active_agent: dict[str, str] = {}  # chat_id -> agent_name
+        self.active_agent: dict[str, str] = {}  # chat_id -> session_key
         self._rate_ts: dict[str, list[float]] = {}
         self._rate_lock = threading.Lock()
         self._app = None
@@ -75,10 +76,8 @@ class AgentStackBot:
     def reload_agents(self):
         self.agents = self._load_agents()
 
-    def _auth(self, user_id: str) -> bool:
-        if not ALLOWED_USERS:
-            return True
-        return user_id in ALLOWED_USERS
+    def _is_admin(self, user_id: str) -> bool:
+        return user_id in ADMIN_USERS
 
     def _rate_ok(self, user_id: str) -> bool:
         now = time.time()
@@ -128,123 +127,204 @@ class AgentStackBot:
         for chunk in self._split(text):
             self._send(chat_id, f"```\n{chunk}\n```", parse_mode="Markdown")
 
-    def _build_claude_cmd(self, agent_name: str, agent_cfg: dict = None) -> list[str]:
+    def _user_session_count(self, user_id: str) -> int:
+        all_active = self.sessions.list_active()
+        return len(users.user_sessions(user_id, all_active))
+
+    def _user_sessions(self, user_id: str) -> list[str]:
+        all_active = self.sessions.list_active()
+        return users.user_sessions(user_id, all_active)
+
+    def _ensure_user(self, tg_user) -> dict:
+        """Ensure user exists in DB, return user dict."""
+        uid = str(tg_user.id)
+        user = users.get_user(uid)
+        if not user:
+            user = users.create_user(uid, tg_user.username or "", tg_user.first_name or "")
+        users.touch_user(uid)
+        return user
+
+    def _build_claude_cmd(self, agent_cfg: dict = None) -> list[str]:
         cmd = ["claude"]
         if agent_cfg and agent_cfg.get("prompt"):
             cmd.extend(["--system-prompt", agent_cfg["prompt"]])
         return cmd
 
-    def _spawn_agent(self, chat_id: str, name: str, agent_cfg: dict = None) -> str:
-        if self.sessions.has(name):
-            return f"Agent '{name}' is already running.\nUse /kill {name} first, or /use {name} to switch."
+    def _spawn_agent(self, user_id: str, chat_id: str, name: str, api_key: str, agent_cfg: dict = None) -> str:
+        skey = users.session_key(user_id, name)
 
-        cmd = self._build_claude_cmd(name, agent_cfg)
+        if self.sessions.has(skey):
+            return f"Agent '{name}' is already running.\n/kill {name} to stop it, or /use {name} to switch."
+
+        if self._user_session_count(user_id) >= MAX_SESSIONS_PER_USER:
+            return f"Session limit reached ({MAX_SESSIONS_PER_USER}). /kill an agent first."
+
+        cmd = self._build_claude_cmd(agent_cfg)
         cwd = agent_cfg.get("cwd", os.path.expanduser("~")) if agent_cfg else os.path.expanduser("~")
         os.makedirs(cwd, exist_ok=True)
+
+        # Pass the user's API key as env var to the Claude Code process
+        env_override = {"ANTHROPIC_API_KEY": api_key} if api_key else {}
 
         def on_output(session_name: str, text: str):
             self._send_output(chat_id, text)
             if not self.sessions.has(session_name):
-                self._send(chat_id, f"Agent '{session_name}' has exited.")
+                self._send(chat_id, f"Agent '{name}' has exited.")
 
         try:
-            self.sessions.create(name, cmd, cwd=cwd, on_output=on_output)
+            self.sessions.create(skey, cmd, cwd=cwd, on_output=on_output, env_override=env_override)
         except Exception as e:
             return f"Failed to spawn '{name}': {e}"
 
-        self.active_agent[chat_id] = name
+        self.active_agent[chat_id] = skey
 
         desc = f"\n{agent_cfg['description']}" if agent_cfg and agent_cfg.get("description") else ""
         return (
             f"Agent '{name}' started.{desc}\n\n"
             f"Active agent: '{name}'\n"
-            f"Terminal window opened on desktop.\n"
-            f"Use /terminal for full terminal in Telegram."
+            f"Use /terminal for the full terminal UI."
         )
 
     # -- Handlers --
 
     async def _handle_start(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            await update.message.reply_text("Not authorized.")
-            return
+        tg_user = update.effective_user
+        user = self._ensure_user(tg_user)
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+        has_key = bool(user.get("api_key"))
+
+        if not has_key:
+            text = (
+                f"Welcome to AgentStack, {tg_user.first_name}!\n\n"
+                "AgentStack lets you run multiple Claude Code AI agents "
+                "from your phone. Each agent is a full Claude Code instance "
+                "that can code, research, write, and more.\n\n"
+                "To get started, set your Anthropic API key:\n"
+                "  /key sk-ant-...\n\n"
+                "Get a key at: https://console.anthropic.com/settings/keys\n\n"
+                "Your key is stored securely and only used to run "
+                "Claude Code on your behalf."
+            )
+            await update.message.reply_text(text)
+            return
+
         agents_list = "\n".join(f"  {n} - {a.get('description', '')}" for n, a in self.agents.items())
+        my_sessions = self._user_sessions(str(tg_user.id))
+        session_info = f"  Active: {', '.join(my_sessions)}" if my_sessions else "  No active agents"
 
         text = (
-            "AgentStack\n"
-            "Multi-Agent Claude Code Manager\n"
-            "================================\n\n"
+            f"AgentStack\n"
+            "================================\n"
+            f"  API Key: ...{user['api_key'][-8:]}\n"
+            f"{session_info}\n\n"
             "Commands:\n"
-            "  /terminal          - Open full terminal UI\n"
-            "  /agents            - List agent presets\n"
-            "  /spawn <name>      - Start an agent\n"
-            "  /kill <name>       - Kill an agent\n"
-            "  /sessions          - List active sessions\n"
-            "  /to <name> <msg>   - Message specific agent\n"
-            "  /use <name>        - Switch active agent\n"
-            "  /sh <cmd>          - Shell command\n"
-            "  /broadcast <msg>   - Message all agents\n"
-            "  /killall           - Kill all agents\n\n"
+            "  /terminal      - Full terminal UI\n"
+            "  /spawn <name>  - Start an agent\n"
+            "  /kill <name>   - Kill an agent\n"
+            "  /sessions      - List your agents\n"
+            "  /to <name> <msg> - Message agent\n"
+            "  /use <name>    - Switch active agent\n"
+            "  /broadcast <msg> - Message all\n"
+            "  /killall       - Kill all your agents\n"
+            "  /key <key>     - Update API key\n"
+            "  /logout        - Remove key + kill all\n\n"
             f"Agent presets:\n{agents_list}"
         )
 
-        # Add Mini App button if URL is configured
         keyboard = []
         if WEBAPP_URL:
-            keyboard.append([InlineKeyboardButton("Open Terminal", web_app={"url": WEBAPP_URL})])
+            token = users.make_web_token(str(tg_user.id))
+            url = f"{WEBAPP_URL}?token={token}"
+            keyboard.append([InlineKeyboardButton("Open Terminal", web_app={"url": url})])
 
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         await update.message.reply_text(text, reply_markup=reply_markup)
 
+    async def _handle_key(self, update, context):
+        tg_user = update.effective_user
+        uid = str(tg_user.id)
+        self._ensure_user(tg_user)
+
+        if not context.args:
+            user = users.get_user(uid)
+            if user and user["api_key"]:
+                await update.message.reply_text(f"API key set: ...{user['api_key'][-8:]}\n\nTo change: /key sk-ant-...")
+            else:
+                await update.message.reply_text("No API key set.\n\nUsage: /key sk-ant-api03-...")
+            return
+
+        key = context.args[0].strip()
+        if not key.startswith("sk-ant-"):
+            await update.message.reply_text("That doesn't look like an Anthropic API key.\nIt should start with: sk-ant-")
+            return
+
+        users.set_api_key(uid, key)
+
+        # Delete the message containing the key for security
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"API key saved (ending ...{key[-8:]})\n\n"
+                 "Your key message was deleted for security.\n"
+                 "You're ready! Try: /spawn dev",
+        )
+
     async def _handle_terminal(self, update, context):
-        """Send a button that opens the Mini App terminal."""
-        if not self._auth(str(update.effective_user.id)):
-            await update.message.reply_text("Not authorized.")
+        tg_user = update.effective_user
+        uid = str(tg_user.id)
+        user = self._ensure_user(tg_user)
+
+        if not user.get("api_key"):
+            await update.message.reply_text("Set your API key first: /key sk-ant-...")
             return
 
         if not WEBAPP_URL:
             await update.message.reply_text(
-                "Mini App URL not configured.\n\n"
-                "Set AGENTSTACK_WEBAPP_URL in .env to the HTTPS URL of your terminal server.\n"
-                "Example: AGENTSTACK_WEBAPP_URL=https://your-domain.ngrok.io/static/terminal.html\n\n"
-                "Meanwhile, use text commands: /spawn, /use, /to"
+                "Terminal UI not available.\n"
+                "Use text commands: /spawn, /use, /to"
             )
             return
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        # Generate a simple auth token from user ID + bot token
-        user_id = str(update.effective_user.id)
-        auth_token = hmac.new(TOKEN.encode(), user_id.encode(), hashlib.sha256).hexdigest()[:32]
-
-        url = f"{WEBAPP_URL}?token={auth_token}"
+        token = users.make_web_token(uid)
+        url = f"{WEBAPP_URL}?token={token}"
 
         keyboard = [[InlineKeyboardButton("Open Terminal", web_app={"url": url})]]
         await update.message.reply_text(
-            "Tap to open the terminal:",
+            "Tap to open:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     async def _handle_agents(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        self._ensure_user(update.effective_user)
         self.reload_agents()
         if not self.agents:
-            await update.message.reply_text("No agents configured. Edit agents.json.")
+            await update.message.reply_text("No agent presets configured.")
             return
         lines = ["Agent presets:\n"]
+        uid = str(update.effective_user.id)
         for name, cfg in self.agents.items():
-            status = " [RUNNING]" if self.sessions.has(name) else ""
+            skey = users.session_key(uid, name)
+            status = " [RUNNING]" if self.sessions.has(skey) else ""
             lines.append(f"  {name}{status}\n    {cfg.get('description', '')}")
         await update.message.reply_text("\n".join(lines))
 
     async def _handle_spawn(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            await update.message.reply_text("Not authorized.")
+        tg_user = update.effective_user
+        uid = str(tg_user.id)
+        user = self._ensure_user(tg_user)
+
+        if not user.get("api_key"):
+            await update.message.reply_text("Set your API key first: /key sk-ant-...")
             return
+
         if not context.args:
             await update.message.reply_text("Usage: /spawn <agent_name>\nSee /agents for presets.")
             return
@@ -257,104 +337,142 @@ class AgentStackBot:
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self._spawn_agent, chat_id, name, agent_cfg)
+        result = await loop.run_in_executor(
+            None, self._spawn_agent, uid, chat_id, name, user["api_key"], agent_cfg
+        )
         await update.message.reply_text(result)
 
     async def _handle_kill(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
+
         if not context.args:
             await update.message.reply_text("Usage: /kill <agent_name>")
             return
+
         name = context.args[0].lower()
+        skey = users.session_key(uid, name)
         chat_id = str(update.effective_chat.id)
-        if self.sessions.destroy(name):
-            if self.active_agent.get(chat_id) == name:
+
+        if self.sessions.destroy(skey):
+            if self.active_agent.get(chat_id) == skey:
                 del self.active_agent[chat_id]
             await update.message.reply_text(f"Agent '{name}' killed.")
         else:
             await update.message.reply_text(f"No active agent '{name}'.")
 
     async def _handle_killall(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
-        active = self.sessions.list_active()
-        if not active:
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
+        chat_id = str(update.effective_chat.id)
+
+        my_sessions = self._user_sessions(uid)
+        if not my_sessions:
             await update.message.reply_text("No active agents.")
             return
-        self.sessions.destroy_all()
-        self.active_agent.pop(str(update.effective_chat.id), None)
-        await update.message.reply_text(f"Killed {len(active)} agent(s): {', '.join(active)}")
+
+        for name in my_sessions:
+            self.sessions.destroy(users.session_key(uid, name))
+        self.active_agent.pop(chat_id, None)
+        await update.message.reply_text(f"Killed {len(my_sessions)} agent(s): {', '.join(my_sessions)}")
 
     async def _handle_sessions(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
         chat_id = str(update.effective_chat.id)
-        active = self.sessions.list_active()
-        current = self.active_agent.get(chat_id, "none")
-        if not active:
+
+        my_sessions = self._user_sessions(uid)
+        active_skey = self.active_agent.get(chat_id, "")
+        active_name = users.parse_session_key(active_skey)[1] if active_skey else ""
+
+        if not my_sessions:
             await update.message.reply_text("No active agents. /spawn <name> to start one.")
             return
-        lines = ["Active agents:\n"]
-        for name in active:
-            marker = " << active" if name == current else ""
+
+        lines = ["Your agents:\n"]
+        for name in my_sessions:
+            marker = " << active" if name == active_name else ""
             lines.append(f"  {name}{marker}")
         await update.message.reply_text("\n".join(lines))
 
     async def _handle_use(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
+
         if not context.args:
             await update.message.reply_text("Usage: /use <agent_name>")
             return
+
         name = context.args[0].lower()
+        skey = users.session_key(uid, name)
         chat_id = str(update.effective_chat.id)
-        if not self.sessions.has(name):
+
+        if not self.sessions.has(skey):
             await update.message.reply_text(f"Agent '{name}' not running. /spawn {name} first.")
             return
-        self.active_agent[chat_id] = name
+
+        self.active_agent[chat_id] = skey
         await update.message.reply_text(f"Switched to '{name}'.")
 
     async def _handle_to(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
+
         if not context.args or len(context.args) < 2:
             await update.message.reply_text("Usage: /to <agent_name> <message>")
             return
+
         name = context.args[0].lower()
         msg = " ".join(context.args[1:])
-        if not self.sessions.has(name):
+        skey = users.session_key(uid, name)
+
+        if not self.sessions.has(skey):
             await update.message.reply_text(f"Agent '{name}' not running.")
             return
-        session = self.sessions.get(name)
+
+        session = self.sessions.get(skey)
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, session.write, msg)
 
     async def _handle_broadcast(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
-            return
+        uid = str(update.effective_user.id)
+        self._ensure_user(update.effective_user)
+
         if not context.args:
             await update.message.reply_text("Usage: /broadcast <message>")
             return
+
         msg = " ".join(context.args)
-        active = self.sessions.list_active()
-        if not active:
+        my_sessions = self._user_sessions(uid)
+
+        if not my_sessions:
             await update.message.reply_text("No active agents.")
             return
+
         loop = asyncio.get_event_loop()
-        for name in active:
-            session = self.sessions.get(name)
+        for name in my_sessions:
+            skey = users.session_key(uid, name)
+            session = self.sessions.get(skey)
             if session:
                 await loop.run_in_executor(None, session.write, msg)
-        await update.message.reply_text(f"Broadcast to {len(active)}: {', '.join(active)}")
+        await update.message.reply_text(f"Broadcast to {len(my_sessions)}: {', '.join(my_sessions)}")
 
     async def _handle_sh(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
+        uid = str(update.effective_user.id)
+        user = self._ensure_user(update.effective_user)
+        if not user.get("api_key"):
+            await update.message.reply_text("Set your API key first: /key sk-ant-...")
             return
+
+        if not self._is_admin(uid):
+            await update.message.reply_text("Shell access is admin-only for security.")
+            return
+
         cmd_text = " ".join(context.args) if context.args else ""
         if not cmd_text:
             await update.message.reply_text("Usage: /sh <command>")
             return
+
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, self._run_sh, cmd_text)
@@ -375,43 +493,89 @@ class AgentStackBot:
         except Exception as e:
             return f"[Error: {e}]"
 
+    async def _handle_logout(self, update, context):
+        uid = str(update.effective_user.id)
+        chat_id = str(update.effective_chat.id)
+
+        # Kill all user sessions
+        my_sessions = self._user_sessions(uid)
+        for name in my_sessions:
+            self.sessions.destroy(users.session_key(uid, name))
+        self.active_agent.pop(chat_id, None)
+
+        # Remove API key
+        users.set_api_key(uid, "")
+        await update.message.reply_text(
+            f"Logged out. Killed {len(my_sessions)} agent(s).\n"
+            "API key removed. Use /key to set a new one."
+        )
+
     async def _handle_reload(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
+        uid = str(update.effective_user.id)
+        if not self._is_admin(uid):
             return
         self.reload_agents()
         await update.message.reply_text(f"Reloaded {len(self.agents)} agent preset(s).")
 
-    async def _handle_unknown_cmd(self, update, context):
-        if not self._auth(str(update.effective_user.id)):
+    async def _handle_admin(self, update, context):
+        """Admin-only: list all users and sessions."""
+        uid = str(update.effective_user.id)
+        if not self._is_admin(uid):
             return
+
+        all_users = users.get_all_users()
+        all_sessions = self.sessions.list_active()
+
+        lines = [f"Users: {len(all_users)}  |  Sessions: {len(all_sessions)}\n"]
+        for u in all_users:
+            key_status = f"...{u['api_key'][-8:]}" if u["api_key"] else "no key"
+            u_sessions = users.user_sessions(u["user_id"], all_sessions)
+            sess_info = f" [{len(u_sessions)} agents]" if u_sessions else ""
+            lines.append(f"  @{u['username'] or u['user_id']} ({key_status}){sess_info}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    async def _handle_unknown_cmd(self, update, context):
+        uid = str(update.effective_user.id)
         chat_id = str(update.effective_chat.id)
-        name = self.active_agent.get(chat_id)
-        if not name or not self.sessions.has(name):
+        skey = self.active_agent.get(chat_id)
+        if not skey or not self.sessions.has(skey):
             return
         text = update.message.text or ""
-        session = self.sessions.get(name)
+        session = self.sessions.get(skey)
         if session and session.is_alive():
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, session.write, text)
 
     async def _handle_message(self, update, context):
-        user = update.effective_user
+        tg_user = update.effective_user
+        uid = str(tg_user.id)
         chat_id = str(update.effective_chat.id)
         text = update.message.text or ""
-        if not self._auth(str(user.id)):
-            await update.message.reply_text("Not authorized.")
-            return
-        if not self._rate_ok(str(user.id)):
+
+        user = self._ensure_user(tg_user)
+
+        if not self._rate_ok(uid):
             await update.message.reply_text("Rate limited.")
             return
+
+        if not user.get("api_key"):
+            await update.message.reply_text(
+                "Welcome! Set your Anthropic API key to get started:\n"
+                "  /key sk-ant-..."
+            )
+            return
+
         if len(text) > MAX_MSG_LEN:
             await update.message.reply_text(f"Too long (max {MAX_MSG_LEN}).")
             return
-        name = self.active_agent.get(chat_id)
-        if not name or not self.sessions.has(name):
+
+        skey = self.active_agent.get(chat_id)
+        if not skey or not self.sessions.has(skey):
             await update.message.reply_text("No active agent. /spawn <name> to start one.")
             return
-        session = self.sessions.get(name)
+
+        session = self.sessions.get(skey)
         if session and session.is_alive():
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, session.write, text)
@@ -432,6 +596,7 @@ class AgentStackBot:
             "start": self._handle_start,
             "help": self._handle_start,
             "terminal": self._handle_terminal,
+            "key": self._handle_key,
             "agents": self._handle_agents,
             "spawn": self._handle_spawn,
             "kill": self._handle_kill,
@@ -441,7 +606,9 @@ class AgentStackBot:
             "to": self._handle_to,
             "broadcast": self._handle_broadcast,
             "sh": self._handle_sh,
+            "logout": self._handle_logout,
             "reload": self._handle_reload,
+            "admin": self._handle_admin,
         }
         for cmd, handler in handlers.items():
             self._app.add_handler(CommandHandler(cmd, handler))
@@ -449,13 +616,16 @@ class AgentStackBot:
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self._app.add_handler(MessageHandler(filters.COMMAND, self._handle_unknown_cmd))
 
+        user_count = len(users.get_all_users())
         print("=" * 50)
         print("  AgentStack")
-        print("  Multi-Agent Claude Code Manager")
+        print("  Multi-User Claude Code Manager")
         print("=" * 50)
-        print(f"  Agents: {len(self.agents)}")
-        print(f"  Users:  {ALLOWED_USERS or ['ALL']}")
-        print(f"  WebApp: {WEBAPP_URL or 'not set'}")
+        print(f"  Agents:  {len(self.agents)} presets")
+        print(f"  Users:   {user_count} registered")
+        print(f"  Admins:  {ADMIN_USERS or ['none']}")
+        print(f"  Limit:   {MAX_SESSIONS_PER_USER} sessions/user")
+        print(f"  WebApp:  {WEBAPP_URL or 'not set'}")
         print()
 
         self._loop = asyncio.new_event_loop()

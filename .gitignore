@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 shared/
+data/
 *.log
 .DS_Store
 venv/
