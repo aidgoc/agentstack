@@ -317,34 +317,42 @@
   <div class="kgroup">
     <button class="kbtn sticky" data-modifier="ctrl" id="modCtrl">Ctrl</button>
     <button class="kbtn sticky" data-modifier="alt" id="modAlt">Alt</button>
+    <button class="kbtn sticky" data-modifier="shift" id="modShift">Shift</button>
   </div>
   <!-- Common Ctrl combos -->
   <div class="kgroup">
-    <button class="kbtn danger-key" data-key="\x03">C-c</button>
-    <button class="kbtn" data-key="\x04">C-d</button>
-    <button class="kbtn" data-key="\x1a">C-z</button>
-    <button class="kbtn" data-key="\x0c">C-l</button>
+    <button class="kbtn danger-key" data-send="ctrl-c">C-c</button>
+    <button class="kbtn" data-send="ctrl-d">C-d</button>
+    <button class="kbtn" data-send="ctrl-z">C-z</button>
+    <button class="kbtn" data-send="ctrl-l">C-l</button>
   </div>
   <!-- Navigation -->
   <div class="kgroup">
-    <button class="kbtn" data-key="\x1b[A">&#9650;</button>
-    <button class="kbtn" data-key="\x1b[B">&#9660;</button>
-    <button class="kbtn" data-key="\x1b[D">&#9664;</button>
-    <button class="kbtn" data-key="\x1b[C">&#9654;</button>
+    <button class="kbtn" data-send="up">&#9650;</button>
+    <button class="kbtn" data-send="down">&#9660;</button>
+    <button class="kbtn" data-send="left">&#9664;</button>
+    <button class="kbtn" data-send="right">&#9654;</button>
   </div>
   <!-- Special keys -->
   <div class="kgroup">
-    <button class="kbtn wide" data-key="\t">Tab</button>
-    <button class="kbtn wide" data-key="\x1b">Esc</button>
+    <button class="kbtn wide" data-send="tab">Tab</button>
+    <button class="kbtn wide" data-send="esc">Esc</button>
   </div>
   <!-- Extra useful keys -->
   <div class="kgroup">
-    <button class="kbtn" data-key="\x1bOH">Home</button>
-    <button class="kbtn" data-key="\x1bOF">End</button>
-    <button class="kbtn" data-key="|">|</button>
-    <button class="kbtn" data-key="~">~</button>
-    <button class="kbtn" data-key="/">/</button>
-    <button class="kbtn" data-key="-">-</button>
+    <button class="kbtn" data-send="home">Home</button>
+    <button class="kbtn" data-send="end">End</button>
+    <button class="kbtn" data-send="pgup">PgUp</button>
+    <button class="kbtn" data-send="pgdn">PgDn</button>
+  </div>
+  <!-- Symbols hard to type on mobile -->
+  <div class="kgroup">
+    <button class="kbtn" data-send="|">|</button>
+    <button class="kbtn" data-send="~">~</button>
+    <button class="kbtn" data-send="/">/</button>
+    <button class="kbtn" data-send="-">-</button>
+    <button class="kbtn" data-send="_">_</button>
+    <button class="kbtn" data-send="`">`</button>
   </div>
   <!-- Clipboard -->
   <div class="kgroup">
@@ -386,10 +394,32 @@ const MAX_RECONNECT_DELAY = 30000;
 
 // Per-session output buffers for tab switching
 let sessionBuffers = {};
+// Output batching for smooth rendering
+let pendingOutput = '';
+let outputRaf = null;
 
 // Sticky modifier state
 let ctrlActive = false;
 let altActive = false;
+let shiftActive = false;
+
+// Key map: name -> actual escape sequence / byte
+const KEY_MAP = {
+  'ctrl-c': '\x03',
+  'ctrl-d': '\x04',
+  'ctrl-z': '\x1a',
+  'ctrl-l': '\x0c',
+  'up':     '\x1b[A',
+  'down':   '\x1b[B',
+  'left':   '\x1b[D',
+  'right':  '\x1b[C',
+  'tab':    '\t',
+  'esc':    '\x1b',
+  'home':   '\x1b[H',
+  'end':    '\x1b[F',
+  'pgup':   '\x1b[5~',
+  'pgdn':   '\x1b[6~',
+};
 
 // Telegram WebApp
 const tg = window.Telegram?.WebApp;
@@ -408,6 +438,7 @@ const authToken = params.get('token') || '';
 // ── Keyboard toolbar ──────────────────────────────────
 
 function sendInput(data) {
+  // Direct send for toolbar buttons (bypass debounce for special keys)
   if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
     ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
   }
@@ -415,19 +446,25 @@ function sendInput(data) {
 
 function applyModifiers(key) {
   let data = key;
-  if (ctrlActive && key.length === 1 && key >= 'a' && key <= 'z') {
-    data = String.fromCharCode(key.charCodeAt(0) - 96); // Ctrl+letter
-  } else if (ctrlActive && key.length === 1 && key >= 'A' && key <= 'Z') {
-    data = String.fromCharCode(key.charCodeAt(0) - 64);
-  } else if (altActive && key.length === 1) {
-    data = '\x1b' + key; // Alt+key = ESC + key
+  if (shiftActive && key.length === 1) {
+    data = key.toUpperCase();
+  }
+  if (ctrlActive && data.length === 1) {
+    const upper = data.toUpperCase();
+    if (upper >= 'A' && upper <= 'Z') {
+      data = String.fromCharCode(upper.charCodeAt(0) - 64); // Ctrl+letter
+    }
+  } else if (altActive && data.length === 1) {
+    data = '\x1b' + data; // Alt+key = ESC + key
   }
   // Reset modifiers after use
-  if (ctrlActive || altActive) {
+  if (ctrlActive || altActive || shiftActive) {
     ctrlActive = false;
     altActive = false;
+    shiftActive = false;
     document.getElementById('modCtrl').classList.remove('active');
     document.getElementById('modAlt').classList.remove('active');
+    document.getElementById('modShift').classList.remove('active');
   }
   return data;
 }
@@ -455,10 +492,24 @@ document.getElementById('keyToolbar').addEventListener('click', (e) => {
     term?.focus();
     return;
   }
+  if (btn.dataset.modifier === 'shift') {
+    shiftActive = !shiftActive;
+    btn.classList.toggle('active', shiftActive);
+    term?.focus();
+    return;
+  }
 
-  // Data key
-  if (btn.dataset.key) {
-    sendInput(btn.dataset.key);
+  // Send key via key map or literal character
+  if (btn.dataset.send) {
+    const seq = KEY_MAP[btn.dataset.send] || btn.dataset.send;
+    sendInput(seq);
+    // Reset modifiers after a key press
+    if (ctrlActive || altActive || shiftActive) {
+      ctrlActive = false; altActive = false; shiftActive = false;
+      document.getElementById('modCtrl').classList.remove('active');
+      document.getElementById('modAlt').classList.remove('active');
+      document.getElementById('modShift').classList.remove('active');
+    }
     term?.focus();
     return;
   }
@@ -488,6 +539,9 @@ document.getElementById('keyToolbar').addEventListener('touchstart', (e) => {
 
 // ── Terminal ──────────────────────────────────────────
 
+// Detect mobile / Telegram WebApp
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || !!window.Telegram?.WebApp;
+
 function initTerminal() {
   term = new Terminal({
     theme: {
@@ -514,12 +568,15 @@ function initTerminal() {
       brightWhite: '#f0f6fc',
     },
     fontFamily: "'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-    fontSize: 13,
+    fontSize: isMobile ? 12 : 13,
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
-    scrollback: 10000,
+    scrollback: 5000,
     allowProposedApi: true,
+    // Reduce GPU overhead on mobile
+    fastScrollModifier: 'none',
+    smoothScrollDuration: 0,
   });
 
   fitAddon = new FitAddon.FitAddon();
@@ -528,22 +585,64 @@ function initTerminal() {
 
   const container = document.getElementById('terminal-container');
   term.open(container);
+
+  // Fix double-typing: disable autocorrect/autocomplete on xterm's hidden textarea
+  const xtermTextarea = container.querySelector('.xterm-helper-textarea');
+  if (xtermTextarea) {
+    xtermTextarea.setAttribute('autocapitalize', 'off');
+    xtermTextarea.setAttribute('autocomplete', 'off');
+    xtermTextarea.setAttribute('autocorrect', 'off');
+    xtermTextarea.setAttribute('spellcheck', 'false');
+    xtermTextarea.setAttribute('inputmode', 'text');
+    // Prevent composition events from causing double input on mobile
+    let composing = false;
+    xtermTextarea.addEventListener('compositionstart', () => { composing = true; });
+    xtermTextarea.addEventListener('compositionend', () => {
+      // Small delay to let xterm process the composed text
+      setTimeout(() => { composing = false; }, 50);
+    });
+  }
+
   fitAddon.fit();
 
-  term.onData(data => {
-    // Apply sticky modifiers to typed characters too
-    const modified = applyModifiers(data);
-    sendInput(modified);
-  });
+  // Debounced input sender to prevent duplicate sends
+  let inputQueue = '';
+  let inputTimer = null;
+  const INPUT_DELAY = isMobile ? 16 : 4; // ms
 
-  term.onResize(({ cols, rows }) => {
-    if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
-      ws.send(JSON.stringify({ type: 'resize', session: currentSession, cols, rows }));
+  function flushInput() {
+    if (inputQueue && ws && ws.readyState === WebSocket.OPEN && currentSession) {
+      ws.send(JSON.stringify({ type: 'input', session: currentSession, data: inputQueue }));
+      inputQueue = '';
+    }
+    inputTimer = null;
+  }
+
+  term.onData(data => {
+    const modified = applyModifiers(data);
+    inputQueue += modified;
+    if (!inputTimer) {
+      inputTimer = setTimeout(flushInput, INPUT_DELAY);
     }
   });
 
-  // Handle window and mobile viewport resize
-  const doFit = () => { if (fitAddon) fitAddon.fit(); };
+  // Debounced resize
+  let resizeTimer = null;
+  term.onResize(({ cols, rows }) => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
+        ws.send(JSON.stringify({ type: 'resize', session: currentSession, cols, rows }));
+      }
+    }, 100);
+  });
+
+  // Handle window resize
+  let fitTimer = null;
+  const doFit = () => {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 50);
+  };
   window.addEventListener('resize', doFit);
 
   // Mobile keyboard resize handling
@@ -584,11 +683,22 @@ function connect() {
         // Buffer output per session
         if (!sessionBuffers[msg.session]) sessionBuffers[msg.session] = '';
         sessionBuffers[msg.session] += msg.data;
-        if (sessionBuffers[msg.session].length > 200000) {
-          sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-150000);
+        if (sessionBuffers[msg.session].length > 100000) {
+          sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-60000);
         }
         if (msg.session === currentSession && term) {
-          term.write(msg.data);
+          // Batch terminal writes using requestAnimationFrame
+          if (!pendingOutput) pendingOutput = '';
+          pendingOutput += msg.data;
+          if (!outputRaf) {
+            outputRaf = requestAnimationFrame(() => {
+              if (pendingOutput && term) {
+                term.write(pendingOutput);
+                pendingOutput = '';
+              }
+              outputRaf = null;
+            });
+          }
         }
         break;
 

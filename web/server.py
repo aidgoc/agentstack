@@ -190,12 +190,29 @@ def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
 
 
 def _blocking_read(fd: int) -> bytes:
+    """Read from PTY fd with batching — collect available data up to 64KB."""
     if fd < 0:
         return b""
     try:
-        r, _, _ = select.select([fd], [], [], 0.05)
-        if r:
-            return os.read(fd, 65536)
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if not r:
+            return b""
+        chunks = []
+        total = 0
+        while total < 65536:
+            try:
+                chunk = os.read(fd, 65536 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                # Check if more data is immediately available
+                r, _, _ = select.select([fd], [], [], 0)
+                if not r:
+                    break
+            except (OSError, BlockingIOError):
+                break
+        return b"".join(chunks)
     except (OSError, ValueError):
         pass
     return b""
@@ -280,7 +297,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
             except Exception:
                 break
-            await asyncio.sleep(0.01)
 
     try:
         while True:
