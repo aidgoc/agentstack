@@ -11,6 +11,16 @@ PORT=${AGENTSTACK_PORT:-8765}
 LOG_DIR="/tmp/agentstack"
 mkdir -p "$LOG_DIR" shared
 
+# Activate venv if present
+[ -f .venv/bin/activate ] && source .venv/bin/activate
+
+# macOS notification helper
+notify() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        osascript -e "display notification \"$1\" with title \"AgentStack\"" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     echo ""
     echo "Shutting down..."
@@ -19,6 +29,7 @@ cleanup() {
     [ -n "$WEB_PID" ]  && kill $WEB_PID 2>/dev/null
     [ -n "$PC_PID" ]   && kill $PC_PID 2>/dev/null
     wait 2>/dev/null
+    notify "Stopped"
     echo "Done."
 }
 trap cleanup EXIT INT TERM
@@ -29,7 +40,7 @@ echo "=================================="
 
 # ── Check deps ────────────────────────────────────────
 missing=""
-for cmd in claude tmux cloudflared python3; do
+for cmd in claude cloudflared python3; do
     if ! command -v $cmd &>/dev/null; then
         missing="$missing $cmd"
     fi
@@ -37,34 +48,26 @@ done
 if [ -n "$missing" ]; then
     echo ""
     echo "Missing:$missing"
-    echo ""
-    echo "Install:"
-    echo "  claude:      npm install -g @anthropic-ai/claude-code"
-    echo "  tmux:        brew install tmux          (Mac)"
-    echo "               sudo apt install tmux      (Linux)"
-    echo "  cloudflared: brew install cloudflared    (Mac)"
-    echo "               see README.md              (Linux)"
+    echo "Run: bash setup.sh"
     exit 1
 fi
 
 # ── Check .env ────────────────────────────────────────
 if [ ! -f .env ]; then
     echo ""
-    echo "No .env file found. Copy from example:"
-    echo "  cp .env.example .env"
-    echo "Then fill in TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS."
+    echo "No .env file. Run: bash setup.sh"
     exit 1
 fi
 
 # ── Kill previous instances ──────────────────────────
-pkill -9 -f "agentstack/web/server.py" 2>/dev/null || true
-pkill -9 -f "agentstack/bot.py" 2>/dev/null || true
-pkill -9 -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
+pkill -f "agentstack/web/server.py" 2>/dev/null || true
+pkill -f "agentstack/bot.py" 2>/dev/null || true
+pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
 # Kill anything on the port (cross-platform)
 if command -v fuser &>/dev/null; then
     fuser -k ${PORT}/tcp 2>/dev/null || true
 elif command -v lsof &>/dev/null; then
-    lsof -ti :${PORT} | xargs kill -9 2>/dev/null || true
+    lsof -ti :${PORT} | xargs kill 2>/dev/null || true
 fi
 
 # Clear stale Telegram polling
@@ -79,12 +82,10 @@ PAPERCLIP_DIR="${PAPERCLIP_DIR:-$HOME/paperclip}"
 if [ -d "$PAPERCLIP_DIR" ] && [ -f "$PAPERCLIP_DIR/.env" ]; then
     echo ""
     echo "[0/3] Paperclip server"
-    # Start DB if using docker
     if [ -f "$PAPERCLIP_DIR/docker-compose.yml" ]; then
         (cd "$PAPERCLIP_DIR" && docker compose up db -d 2>/dev/null) || true
         sleep 2
     fi
-    # Check if already running
     if curl -s http://127.0.0.1:3100/api/health > /dev/null 2>&1; then
         echo "  Already running"
     else
@@ -99,7 +100,7 @@ if [ -d "$PAPERCLIP_DIR" ] && [ -f "$PAPERCLIP_DIR/.env" ]; then
     fi
 else
     echo ""
-    echo "[0/3] Paperclip: not found (optional — clone to ~/paperclip)"
+    echo "[0/3] Paperclip: not found (optional)"
 fi
 
 # ── 1. Web server ────────────────────────────────────
@@ -114,17 +115,21 @@ if ! kill -0 $WEB_PID 2>/dev/null; then
     cat "$LOG_DIR/web.log"
     exit 1
 fi
-echo "  OK (pid $WEB_PID)"
+
+# Health check
+if curl -sf http://localhost:$PORT/health > /dev/null 2>&1; then
+    echo "  OK (pid $WEB_PID)"
+else
+    echo "  WARN: server started but health check failed"
+fi
 
 # ── 2. Cloudflare tunnel ─────────────────────────────
 echo "[2/3] Cloudflare tunnel"
 cloudflared tunnel --url http://localhost:$PORT > "$LOG_DIR/tunnel.log" 2>&1 &
 CF_PID=$!
 
-# Wait for URL (up to 20 seconds)
 TUNNEL_URL=""
 for i in $(seq 1 40); do
-    # Cross-platform grep (no -P on Mac)
     TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | head -1)
     [ -n "$TUNNEL_URL" ] && break
     sleep 0.5
@@ -140,7 +145,6 @@ WEBAPP_URL="${TUNNEL_URL}/static/terminal.html"
 echo "  $TUNNEL_URL"
 
 # ── 3. Configure bot with new URL ────────────────────
-# Update .env (cross-platform sed)
 if grep -q "AGENTSTACK_WEBAPP_URL" .env 2>/dev/null; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
         sed -i '' "s|AGENTSTACK_WEBAPP_URL=.*|AGENTSTACK_WEBAPP_URL=$WEBAPP_URL|" .env
@@ -182,16 +186,30 @@ echo "=================================="
 echo "  Web:       http://localhost:$PORT"
 echo "  Tunnel:    $TUNNEL_URL"
 echo "  Terminal:  $WEBAPP_URL"
-echo "  Paperclip: http://127.0.0.1:3100"
+echo "  Health:    http://localhost:$PORT/health"
 echo "  Logs:      $LOG_DIR/"
 echo ""
 echo "  Ctrl+C to stop"
 echo "=================================="
 echo ""
 
-# Tail logs
-tail -f "$LOG_DIR/bot.log" "$LOG_DIR/web.log" 2>/dev/null &
-TAIL_PID=$!
+notify "All systems go — $TUNNEL_URL"
 
-wait $BOT_PID 2>/dev/null
-echo "Bot exited."
+# Keep running — restart bot if it dies
+while true; do
+    if ! kill -0 $BOT_PID 2>/dev/null; then
+        echo "$(date) Bot died. Restarting..."
+        notify "Bot crashed — restarting"
+        sleep 3
+        python3 -u bot.py > "$LOG_DIR/bot.log" 2>&1 &
+        BOT_PID=$!
+    fi
+    if ! kill -0 $WEB_PID 2>/dev/null; then
+        echo "$(date) Web server died. Restarting..."
+        notify "Web server crashed — restarting"
+        sleep 3
+        python3 -u web/server.py > "$LOG_DIR/web.log" 2>&1 &
+        WEB_PID=$!
+    fi
+    sleep 10
+done

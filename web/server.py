@@ -8,16 +8,19 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import pty
+import re
 import select
 import signal
 import struct
 import sys
 import fcntl
 import termios
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
@@ -27,16 +30,39 @@ import users
 log = logging.getLogger("agentstack.web")
 
 AGENTS_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "agents.json"
+START_TIME = time.time()
 
-app = FastAPI(title="AgentStack Terminal")
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+# Cached agents.json with mtime check
+_agents_cache = {}
+_agents_mtime = 0.0
 
 
 def load_agents() -> dict:
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            return json.load(f).get("agents", {})
-    return {}
+    global _agents_cache, _agents_mtime
+    try:
+        mt = AGENTS_FILE.stat().st_mtime
+        if mt != _agents_mtime:
+            with open(AGENTS_FILE) as f:
+                _agents_cache = json.load(f).get("agents", {})
+            _agents_mtime = mt
+    except FileNotFoundError:
+        _agents_cache = {}
+    return _agents_cache
+
+
+# Env vars to strip from spawned PTY sessions
+_STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_SESSION")
+
+# Session name sanitizer
+_NAME_RE = re.compile(r'[^a-z0-9_-]')
+
+
+def _sanitize_name(name: str) -> str:
+    return _NAME_RE.sub('', name.lower().strip())[:32]
+
+
+app = FastAPI(title="AgentStack Terminal")
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 
 class PtySession:
@@ -52,6 +78,8 @@ class PtySession:
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
+        for var in _STRIP_ENV:
+            env.pop(var, None)
         if env_extra:
             env.update(env_extra)
 
@@ -155,35 +183,75 @@ def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
             cmd.extend(["--system-prompt", cfg["prompt"]])
         cwd = cfg.get("cwd", os.path.expanduser("~"))
     else:
-        cmd = [os.environ.get("SHELL", "/bin/bash")]
+        default_shell = "/bin/zsh" if platform.system() == "Darwin" else "/bin/bash"
+        cmd = [os.environ.get("SHELL", default_shell)]
         cwd = os.path.expanduser("~")
     return cmd, cwd
 
 
-def _blocking_read(session: PtySession) -> bytes:
-    if session.fd < 0:
+def _blocking_read(fd: int) -> bytes:
+    if fd < 0:
         return b""
     try:
-        r, _, _ = select.select([session.fd], [], [], 0.1)
+        r, _, _ = select.select([fd], [], [], 0.05)
         if r:
-            return os.read(session.fd, 65536)
+            return os.read(fd, 65536)
     except (OSError, ValueError):
         pass
     return b""
 
+
+# ── Lifecycle events ──────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(_reap_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    log.info("Shutting down — killing all PTY sessions")
+    pool.kill_all()
+
+
+async def _reap_loop():
+    """Periodically reap dead sessions to avoid zombie processes."""
+    while True:
+        pool.list_names()
+        await asyncio.sleep(30)
+
+
+# ── Routes ────────────────────────────────────────────
 
 @app.get("/")
 async def index():
     return RedirectResponse("/static/terminal.html")
 
 
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "sessions": len(pool.list_names()),
+        "uptime": round(time.time() - START_TIME),
+    }
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
-    if not users.verify_web_token(token):
-        await websocket.close(code=4001, reason="Unauthorized")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+
+    # First message must be auth
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        msg = json.loads(raw)
+        if msg.get("type") != "auth" or not users.verify_web_token(msg.get("token", "")):
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+    except (asyncio.TimeoutError, Exception):
+        await websocket.close(code=4001, reason="Auth timeout")
         return
 
-    await websocket.accept()
     agents = load_agents()
     attached_session: str | None = None
     reader_task: asyncio.Task | None = None
@@ -203,7 +271,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                     pass
                 break
             try:
-                data = await loop.run_in_executor(None, _blocking_read, session)
+                data = await loop.run_in_executor(None, _blocking_read, session.fd)
                 if data:
                     await websocket.send_json({
                         "type": "output",
@@ -212,7 +280,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                     })
             except Exception:
                 break
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
 
     try:
         while True:
@@ -231,7 +299,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
                 })
 
             elif msg_type == "spawn":
-                name = msg.get("session", "").lower().strip()
+                name = _sanitize_name(msg.get("session", ""))
                 if not name:
                     await websocket.send_json({"type": "error", "message": "No session name"})
                     continue
@@ -305,6 +373,13 @@ def main():
     import uvicorn
     host = os.getenv("AGENTSTACK_HOST", "0.0.0.0")
     port = int(os.getenv("AGENTSTACK_PORT", "8765"))
+
+    def _handle_signal(sig, frame):
+        pool.kill_all()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
     print("=" * 40)
     print("  AgentStack Terminal Server")
     print("=" * 40)

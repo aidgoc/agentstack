@@ -1,8 +1,10 @@
 # AgentStack
 
-Run unlimited Claude Code agents from Telegram. Each user brings their own API key.
+Your personal terminal, from Telegram. One machine, one bot, one owner, unlimited sessions.
 
-## Install & Run
+Open a full xterm.js terminal inside Telegram Mini App. Run Claude Code, bash, ssh — anything. Spawn multiple agent sessions with pre-configured prompts.
+
+## Quick Start (macOS)
 
 ```bash
 git clone https://github.com/aidgoc/agentstack.git
@@ -10,46 +12,58 @@ cd agentstack
 bash setup.sh
 ```
 
-That's it. It installs deps, asks for your bot token, starts everything.
+That's it. Installs deps, asks for your bot token, starts everything.
 
 Need a bot token? Open [@BotFather](https://t.me/BotFather) on Telegram → `/newbot`.
 
-## What happens
+## How It Works
 
-- Any Telegram user opens your bot → `/start`
-- They set their Anthropic API key → `/key sk-ant-...` (message auto-deleted)
-- They tap **"Open Terminal"** → full xterm.js terminal inside Telegram
-- They spawn agents → each one is a Claude Code instance with their own key
-- Switch between agents with tabs. Fully isolated per user.
+1. Open your bot on Telegram → `/start`
+2. Tap **"Open Terminal"** → full terminal inside Telegram
+3. Spawn sessions → each one is a real PTY (bash, Claude Code, etc.)
+4. Switch between sessions with tabs
 
-## Commands
+## Bot Commands
 
 | Command | What it does |
 |---------|-------------|
-| `/start` | Onboard + help |
-| `/key sk-ant-...` | Set your API key |
+| `/start` | Welcome + open terminal |
 | `/terminal` | Open terminal UI |
-| `/spawn <name>` | Start an agent |
-| `/kill <name>` | Stop an agent |
-| `/sessions` | List your agents |
-| `/use <name>` | Switch active agent |
-| `/to <name> <msg>` | Message specific agent |
-| `/broadcast <msg>` | Message all agents |
-| `/killall` | Stop all your agents |
-| `/logout` | Remove key + stop all |
+| `/sh <cmd>` | Quick shell command |
+| `/org` | Paperclip org overview |
+| `/tasks` | List tasks |
+| `/task <title>` | Create or view a task |
+| `/team` | List agents |
+| `/hire <name>` | Create an agent |
+| `/done <id>` | Mark task done |
 
-## Agent presets
+## Agent Presets
 
 Edit `agents.json` to add/change presets. Ships with: atlas (researcher), scribe (writer), trendy (trends), crm, dev.
+
+## Auto-Start on macOS
+
+```bash
+bash macos/install-service.sh
+```
+
+This installs a launchd service that starts AgentStack on login.
 
 ## Docker
 
 ```bash
-git clone https://github.com/aidgoc/agentstack.git
-cd agentstack
 cp .env.example .env
-nano .env   # add bot token
+nano .env   # add bot token + owner ID
 docker compose up -d
+```
+
+## Architecture
+
+```
+Telegram → Bot (python-telegram-bot)
+             ↓ generates HMAC token
+         Mini App → WebSocket → FastAPI → PTY sessions
+             ↑ via Cloudflare quick tunnel
 ```
 
 ## License

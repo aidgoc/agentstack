@@ -25,9 +25,12 @@
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     height: 100vh;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   /* Top bar */
@@ -52,6 +55,7 @@
     width: 8px; height: 8px;
     border-radius: 50%;
     background: var(--red);
+    transition: background 0.3s;
   }
   .status-dot.connected { background: var(--green); }
 
@@ -70,12 +74,15 @@
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 4px 10px;
+    padding: 6px 12px;
     font-size: 12px;
     cursor: pointer;
     transition: all 0.15s;
+    min-height: 32px;
+    touch-action: manipulation;
   }
   .btn:hover { color: var(--text); border-color: var(--accent); }
+  .btn:active { transform: scale(0.97); }
   .btn.danger:hover { border-color: var(--red); color: var(--red); }
   .btn.spawn { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.spawn:hover { opacity: 0.9; }
@@ -89,10 +96,13 @@
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
     flex-shrink: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
   }
+  .sessions-bar::-webkit-scrollbar { display: none; }
 
   .session-tab {
-    padding: 4px 12px;
+    padding: 6px 14px;
     border-radius: 4px;
     font-size: 12px;
     cursor: pointer;
@@ -101,8 +111,13 @@
     color: var(--text-dim);
     white-space: nowrap;
     transition: all 0.15s;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    touch-action: manipulation;
   }
   .session-tab:hover { color: var(--text); }
+  .session-tab:active { transform: scale(0.97); }
   .session-tab.active {
     background: var(--accent);
     color: #fff;
@@ -114,6 +129,84 @@
     flex: 1;
     padding: 4px;
     overflow: hidden;
+    position: relative;
+  }
+
+  /* Session ended overlay */
+  .session-ended {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(13, 17, 23, 0.85);
+    z-index: 10;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .session-ended.show { display: flex; }
+  .session-ended p { color: var(--text-dim); font-size: 14px; }
+
+  /* Keyboard toolbar */
+  .keyboard-toolbar {
+    display: flex;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 2px;
+    padding: 4px 6px;
+  }
+  .keyboard-toolbar::-webkit-scrollbar { display: none; }
+
+  .keyboard-toolbar .kgroup {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .keyboard-toolbar .kgroup + .kgroup {
+    margin-left: 4px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border);
+  }
+
+  .kbtn {
+    background: var(--bg);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0;
+    width: 38px;
+    height: 34px;
+    font-size: 11px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', monospace;
+    cursor: pointer;
+    touch-action: manipulation;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .kbtn:active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .kbtn.sticky {
+    position: relative;
+  }
+  .kbtn.sticky.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .kbtn.wide { width: 48px; }
+  .kbtn.danger-key:active {
+    background: var(--red);
+    border-color: var(--red);
   }
 
   /* Spawn dialog */
@@ -148,35 +241,41 @@
     gap: 8px;
     max-height: 300px;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .agent-card {
-    padding: 10px 12px;
+    padding: 12px 14px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     cursor: pointer;
     transition: all 0.15s;
+    min-height: 44px;
+    touch-action: manipulation;
   }
   .agent-card:hover { border-color: var(--accent); }
+  .agent-card:active { transform: scale(0.98); }
   .agent-card .name { font-weight: 600; font-size: 14px; }
   .agent-card .desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 
   .dialog-close {
     margin-top: 12px;
     width: 100%;
-    padding: 8px;
+    padding: 10px;
     background: var(--bg);
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
+    min-height: 44px;
+    touch-action: manipulation;
   }
 
   /* Status bar */
   .statusbar {
-    padding: 4px 12px;
+    padding: 6px 12px;
     background: var(--surface);
     border-top: 1px solid var(--border);
     font-size: 11px;
@@ -205,7 +304,53 @@
 <div class="sessions-bar" id="sessionsBar"></div>
 
 <!-- Terminal -->
-<div id="terminal-container"></div>
+<div id="terminal-container">
+  <div class="session-ended" id="sessionEnded">
+    <p>Session ended</p>
+    <button class="btn spawn" onclick="showSpawnDialog()">New Session</button>
+  </div>
+</div>
+
+<!-- Keyboard toolbar -->
+<div class="keyboard-toolbar" id="keyToolbar">
+  <!-- Modifier keys (sticky) -->
+  <div class="kgroup">
+    <button class="kbtn sticky" data-modifier="ctrl" id="modCtrl">Ctrl</button>
+    <button class="kbtn sticky" data-modifier="alt" id="modAlt">Alt</button>
+  </div>
+  <!-- Common Ctrl combos -->
+  <div class="kgroup">
+    <button class="kbtn danger-key" data-key="\x03">C-c</button>
+    <button class="kbtn" data-key="\x04">C-d</button>
+    <button class="kbtn" data-key="\x1a">C-z</button>
+    <button class="kbtn" data-key="\x0c">C-l</button>
+  </div>
+  <!-- Navigation -->
+  <div class="kgroup">
+    <button class="kbtn" data-key="\x1b[A">&#9650;</button>
+    <button class="kbtn" data-key="\x1b[B">&#9660;</button>
+    <button class="kbtn" data-key="\x1b[D">&#9664;</button>
+    <button class="kbtn" data-key="\x1b[C">&#9654;</button>
+  </div>
+  <!-- Special keys -->
+  <div class="kgroup">
+    <button class="kbtn wide" data-key="\t">Tab</button>
+    <button class="kbtn wide" data-key="\x1b">Esc</button>
+  </div>
+  <!-- Extra useful keys -->
+  <div class="kgroup">
+    <button class="kbtn" data-key="\x1bOH">Home</button>
+    <button class="kbtn" data-key="\x1bOF">End</button>
+    <button class="kbtn" data-key="|">|</button>
+    <button class="kbtn" data-key="~">~</button>
+    <button class="kbtn" data-key="/">/</button>
+    <button class="kbtn" data-key="-">-</button>
+  </div>
+  <!-- Clipboard -->
+  <div class="kgroup">
+    <button class="kbtn wide" id="pasteBtn">Paste</button>
+  </div>
+</div>
 
 <!-- Status bar -->
 <div class="statusbar">
@@ -236,6 +381,15 @@ let currentSession = null;
 let sessions = [];
 let agents = {};
 let autoSpawned = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 30000;
+
+// Per-session output buffers for tab switching
+let sessionBuffers = {};
+
+// Sticky modifier state
+let ctrlActive = false;
+let altActive = false;
 
 // Telegram WebApp
 const tg = window.Telegram?.WebApp;
@@ -250,6 +404,89 @@ if (tg) {
 // Get auth token from URL params
 const params = new URLSearchParams(location.search);
 const authToken = params.get('token') || '';
+
+// ── Keyboard toolbar ──────────────────────────────────
+
+function sendInput(data) {
+  if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
+    ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
+  }
+}
+
+function applyModifiers(key) {
+  let data = key;
+  if (ctrlActive && key.length === 1 && key >= 'a' && key <= 'z') {
+    data = String.fromCharCode(key.charCodeAt(0) - 96); // Ctrl+letter
+  } else if (ctrlActive && key.length === 1 && key >= 'A' && key <= 'Z') {
+    data = String.fromCharCode(key.charCodeAt(0) - 64);
+  } else if (altActive && key.length === 1) {
+    data = '\x1b' + key; // Alt+key = ESC + key
+  }
+  // Reset modifiers after use
+  if (ctrlActive || altActive) {
+    ctrlActive = false;
+    altActive = false;
+    document.getElementById('modCtrl').classList.remove('active');
+    document.getElementById('modAlt').classList.remove('active');
+  }
+  return data;
+}
+
+// Bind toolbar buttons
+document.getElementById('keyToolbar').addEventListener('click', (e) => {
+  const btn = e.target.closest('.kbtn');
+  if (!btn) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  // Sticky modifier toggle
+  if (btn.dataset.modifier === 'ctrl') {
+    ctrlActive = !ctrlActive;
+    btn.classList.toggle('active', ctrlActive);
+    if (ctrlActive) { altActive = false; document.getElementById('modAlt').classList.remove('active'); }
+    term?.focus();
+    return;
+  }
+  if (btn.dataset.modifier === 'alt') {
+    altActive = !altActive;
+    btn.classList.toggle('active', altActive);
+    if (altActive) { ctrlActive = false; document.getElementById('modCtrl').classList.remove('active'); }
+    term?.focus();
+    return;
+  }
+
+  // Data key
+  if (btn.dataset.key) {
+    sendInput(btn.dataset.key);
+    term?.focus();
+    return;
+  }
+});
+
+// Paste button
+document.getElementById('pasteBtn').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) sendInput(text);
+  } catch {
+    // Fallback: prompt
+    const text = prompt('Paste text:');
+    if (text) sendInput(text);
+  }
+  term?.focus();
+});
+
+// Prevent toolbar buttons from stealing focus from terminal
+document.getElementById('keyToolbar').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+});
+document.getElementById('keyToolbar').addEventListener('touchstart', (e) => {
+  // Don't preventDefault here — it would block the click
+}, { passive: true });
+
+// ── Terminal ──────────────────────────────────────────
 
 function initTerminal() {
   term = new Terminal({
@@ -276,12 +513,12 @@ function initTerminal() {
       brightCyan: '#56d4dd',
       brightWhite: '#f0f6fc',
     },
-    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+    fontFamily: "'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
     fontSize: 13,
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
-    scrollback: 5000,
+    scrollback: 10000,
     allowProposedApi: true,
   });
 
@@ -294,9 +531,9 @@ function initTerminal() {
   fitAddon.fit();
 
   term.onData(data => {
-    if (ws && ws.readyState === WebSocket.OPEN && currentSession) {
-      ws.send(JSON.stringify({ type: 'input', session: currentSession, data: data }));
-    }
+    // Apply sticky modifiers to typed characters too
+    const modified = applyModifiers(data);
+    sendInput(modified);
   });
 
   term.onResize(({ cols, rows }) => {
@@ -305,17 +542,36 @@ function initTerminal() {
     }
   });
 
-  window.addEventListener('resize', () => {
-    if (fitAddon) fitAddon.fit();
-  });
+  // Handle window and mobile viewport resize
+  const doFit = () => { if (fitAddon) fitAddon.fit(); };
+  window.addEventListener('resize', doFit);
+
+  // Mobile keyboard resize handling
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+      const cont = document.getElementById('terminal-container');
+      const topbar = document.querySelector('.topbar');
+      const sessbar = document.getElementById('sessionsBar');
+      const toolbar = document.getElementById('keyToolbar');
+      const statusbar = document.querySelector('.statusbar');
+      const usedHeight = topbar.offsetHeight + sessbar.offsetHeight + toolbar.offsetHeight + statusbar.offsetHeight;
+      cont.style.height = (window.visualViewport.height - usedHeight) + 'px';
+      doFit();
+    });
+  }
 }
 
+// ── WebSocket ─────────────────────────────────────────
+
 function connect() {
-  ws = new WebSocket(WS_URL + '?token=' + authToken);
+  ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
+    // Send auth as first message (token not in URL for security)
+    ws.send(JSON.stringify({ type: 'auth', token: authToken }));
     document.getElementById('statusDot').classList.add('connected');
     document.getElementById('statusText').textContent = 'Connected';
+    reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: 'list_sessions' }));
     ws.send(JSON.stringify({ type: 'list_agents' }));
   };
@@ -325,6 +581,12 @@ function connect() {
 
     switch (msg.type) {
       case 'output':
+        // Buffer output per session
+        if (!sessionBuffers[msg.session]) sessionBuffers[msg.session] = '';
+        sessionBuffers[msg.session] += msg.data;
+        if (sessionBuffers[msg.session].length > 200000) {
+          sessionBuffers[msg.session] = sessionBuffers[msg.session].slice(-150000);
+        }
         if (msg.session === currentSession && term) {
           term.write(msg.data);
         }
@@ -333,7 +595,6 @@ function connect() {
       case 'sessions':
         sessions = msg.sessions || [];
         renderSessions();
-        // Auto-spawn a shell if no sessions exist
         if (sessions.length === 0 && !autoSpawned) {
           autoSpawned = true;
           spawnSession('shell');
@@ -349,17 +610,25 @@ function connect() {
       case 'spawned':
         currentSession = msg.session;
         sessions = msg.sessions || sessions;
+        sessionBuffers[msg.session] = '';
         renderSessions();
+        document.getElementById('sessionEnded').classList.remove('show');
         switchToSession(msg.session);
         break;
 
       case 'killed':
         sessions = msg.sessions || sessions;
+        delete sessionBuffers[msg.session];
         if (currentSession === msg.session) {
-          currentSession = sessions.length > 0 ? sessions[0] : null;
+          if (sessions.length > 0) {
+            currentSession = sessions[0];
+            switchToSession(currentSession);
+          } else {
+            currentSession = null;
+            document.getElementById('sessionEnded').classList.add('show');
+          }
         }
         renderSessions();
-        if (currentSession) switchToSession(currentSession);
         break;
 
       case 'error':
@@ -370,14 +639,19 @@ function connect() {
 
   ws.onclose = () => {
     document.getElementById('statusDot').classList.remove('connected');
-    document.getElementById('statusText').textContent = 'Disconnected. Reconnecting...';
-    setTimeout(connect, 3000);
+    reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
+    document.getElementById('statusText').textContent =
+      `Reconnecting (attempt ${reconnectAttempts})...`;
+    setTimeout(connect, delay);
   };
 
   ws.onerror = () => {
     ws.close();
   };
 }
+
+// ── Sessions ──────────────────────────────────────────
 
 function renderSessions() {
   const bar = document.getElementById('sessionsBar');
@@ -399,12 +673,18 @@ function switchToSession(name) {
   currentSession = name;
   document.getElementById('currentAgent').textContent = name;
   document.getElementById('killBtn').style.display = '';
+  document.getElementById('sessionEnded').classList.remove('show');
 
   document.querySelectorAll('.session-tab').forEach(tab => {
     tab.classList.toggle('active', tab.textContent === name);
   });
 
-  if (term) term.clear();
+  if (term) {
+    term.reset();
+    if (sessionBuffers[name]) {
+      term.write(sessionBuffers[name]);
+    }
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'attach', session: name }));
     if (fitAddon) fitAddon.fit();
@@ -415,17 +695,15 @@ function showSpawnDialog() {
   const list = document.getElementById('agentsList');
   list.innerHTML = '';
 
-  // Shell option first
   const shell = document.createElement('div');
   shell.className = 'agent-card';
-  shell.innerHTML = '<div class="name">shell</div><div class="desc">New bash terminal — run anything</div>';
+  shell.innerHTML = '<div class="name">shell</div><div class="desc">New terminal — run anything</div>';
   shell.onclick = () => {
     const name = 'shell' + (sessions.filter(s => s.startsWith('shell')).length || '');
     spawnSession(name === 'shell0' ? 'shell' : name);
   };
   list.appendChild(shell);
 
-  // Agent presets
   Object.entries(agents).forEach(([name, cfg]) => {
     const card = document.createElement('div');
     card.className = 'agent-card';
@@ -434,7 +712,6 @@ function showSpawnDialog() {
     list.appendChild(card);
   });
 
-  // Custom name option
   const custom = document.createElement('div');
   custom.className = 'agent-card';
   custom.innerHTML = '<div class="name">custom...</div><div class="desc">Custom named session</div>';
