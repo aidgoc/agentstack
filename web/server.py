@@ -1,7 +1,7 @@
 """WebSocket terminal server for AgentStack.
 
 Single-owner: only authenticated owner can connect.
-Opens real PTY sessions — bash, claude, anything.
+Uses tmux for session persistence — sessions survive server restarts.
 """
 
 import asyncio
@@ -12,18 +12,19 @@ import platform
 import pty
 import re
 import select
+import shutil
 import signal
 import struct
+import subprocess
 import sys
 import fcntl
 import termios
-import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse, JSONResponse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import users
@@ -31,11 +32,19 @@ import users
 log = logging.getLogger("agentstack.web")
 
 AGENTS_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "agents.json"
+PROJECT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 START_TIME = time.time()
+UPLOAD_DIR = Path(os.path.expanduser("~")) / "uploads"
+
+# tmux session prefix to avoid collisions
+TMUX_PREFIX = "as_"
 
 # Cached agents.json with mtime check
 _agents_cache = {}
 _agents_mtime = 0.0
+
+# Use tmux if available, fall back to raw PTY
+HAS_TMUX = shutil.which("tmux") is not None
 
 
 def load_agents() -> dict:
@@ -65,20 +74,93 @@ def _sanitize_name(name: str) -> str:
 app = FastAPI(title="AgentStack Terminal")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
-# Replay buffer size per session (last 32KB of output for reconnect)
-REPLAY_BUFFER_SIZE = 32768
+# Replay buffer size per session (64KB for rich terminal state on reconnect)
+REPLAY_BUFFER_SIZE = 65536
 
+
+# ── tmux helpers ─────────────────────────────────────────
+
+def tmux_session_name(name: str) -> str:
+    return f"{TMUX_PREFIX}{name}"
+
+
+def tmux_list_sessions() -> list[str]:
+    """List active tmux sessions with our prefix."""
+    if not HAS_TMUX:
+        return []
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return []
+        names = []
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.startswith(TMUX_PREFIX):
+                names.append(line[len(TMUX_PREFIX):])
+        return names
+    except Exception:
+        return []
+
+
+def tmux_create_session(name: str, cmd: list[str], cwd: str, env_extra: dict = None):
+    """Create a detached tmux session."""
+    sess = tmux_session_name(name)
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    env["COLORTERM"] = "truecolor"
+    for var in _STRIP_ENV:
+        env.pop(var, None)
+    if env_extra:
+        env.update(env_extra)
+
+    # Build the shell command string
+    shell_cmd = " ".join(cmd)
+
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", sess, "-x", "120", "-y", "35", shell_cmd],
+        cwd=cwd, env=env, timeout=10,
+        capture_output=True
+    )
+
+
+def tmux_kill_session(name: str):
+    """Kill a tmux session."""
+    sess = tmux_session_name(name)
+    try:
+        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def tmux_session_exists(name: str) -> bool:
+    """Check if a tmux session exists."""
+    sess = tmux_session_name(name)
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", sess],
+            capture_output=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+# ── PTY Session (attaches to tmux or runs raw) ──────────
 
 class PtySession:
-    def __init__(self, name: str, cmd: list[str], cwd: str = None, env_extra: dict = None):
+    def __init__(self, name: str, cmd: list[str], cwd: str = None, env_extra: dict = None, use_tmux: bool = True):
         self.name = name
         self.pid = -1
         self.fd = -1
         self._alive = False
         self.replay_buffer = bytearray()
+        self.uses_tmux = use_tmux and HAS_TMUX
+        self.cwd = cwd or os.path.expanduser("~")
 
-        cwd = cwd or os.path.expanduser("~")
-        os.makedirs(cwd, exist_ok=True)
+        os.makedirs(self.cwd, exist_ok=True)
 
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
@@ -88,24 +170,41 @@ class PtySession:
         if env_extra:
             env.update(env_extra)
 
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            os.chdir(cwd)
-            os.execvpe(cmd[0], cmd, env)
+        if self.uses_tmux:
+            # Create tmux session if it doesn't exist
+            if not tmux_session_exists(name):
+                tmux_create_session(name, cmd, self.cwd, env_extra)
+                time.sleep(0.3)
+
+            # Attach to tmux session via PTY
+            attach_cmd = ["tmux", "attach", "-t", tmux_session_name(name)]
+            self.pid, self.fd = pty.fork()
+            if self.pid == 0:
+                os.chdir(self.cwd)
+                os.execvpe(attach_cmd[0], attach_cmd, env)
+            else:
+                self._alive = True
+                flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
+                fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                log.info("tmux PTY '%s' started (pid=%d)", name, self.pid)
         else:
-            self._alive = True
-            flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-            fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-            log.info("PTY '%s' started (pid=%d)", name, self.pid)
+            # Raw PTY fallback
+            self.pid, self.fd = pty.fork()
+            if self.pid == 0:
+                os.chdir(self.cwd)
+                os.execvpe(cmd[0], cmd, env)
+            else:
+                self._alive = True
+                flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
+                fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                log.info("PTY '%s' started (pid=%d)", name, self.pid)
 
     def append_replay(self, data: bytes):
-        """Append output data to the replay buffer, trimming to max size."""
         self.replay_buffer.extend(data)
         if len(self.replay_buffer) > REPLAY_BUFFER_SIZE:
             self.replay_buffer = self.replay_buffer[-REPLAY_BUFFER_SIZE:]
 
     def get_replay(self) -> str:
-        """Get replay buffer as string for client reconnect."""
         return self.replay_buffer.decode("utf-8", errors="replace")
 
     def resize(self, cols: int, rows: int):
@@ -131,6 +230,9 @@ class PtySession:
                 self._alive = False
         except ChildProcessError:
             self._alive = False
+        # For tmux sessions, also check if the tmux session itself is alive
+        if not self._alive and self.uses_tmux:
+            return tmux_session_exists(self.name)
         return self._alive
 
     def kill(self):
@@ -144,14 +246,12 @@ class PtySession:
         if self.pid > 0:
             try:
                 os.kill(self.pid, signal.SIGTERM)
-                # Wait up to 3 seconds for graceful shutdown
                 for _ in range(30):
                     pid, _ = os.waitpid(self.pid, os.WNOHANG)
                     if pid != 0:
                         break
                     time.sleep(0.1)
                 else:
-                    # Force kill if SIGTERM didn't work
                     try:
                         os.kill(self.pid, signal.SIGKILL)
                         os.waitpid(self.pid, 0)
@@ -159,6 +259,9 @@ class PtySession:
                         pass
             except (OSError, ChildProcessError):
                 pass
+        # Also kill the tmux session
+        if self.uses_tmux:
+            tmux_kill_session(self.name)
         log.info("PTY '%s' killed", self.name)
 
 
@@ -168,7 +271,20 @@ class SessionPool:
 
     def spawn(self, key: str, cmd: list[str], cwd: str = None, env_extra: dict = None) -> PtySession:
         if key in self.sessions:
-            self.sessions[key].kill()
+            old = self.sessions[key]
+            # Just detach the old PTY, don't kill tmux session if re-attaching
+            old._alive = False
+            if old.fd >= 0:
+                try:
+                    os.close(old.fd)
+                except OSError:
+                    pass
+                old.fd = -1
+            if old.pid > 0:
+                try:
+                    os.kill(old.pid, signal.SIGTERM)
+                except (OSError, ChildProcessError):
+                    pass
         session = PtySession(key, cmd, cwd, env_extra)
         self.sessions[key] = session
         return session
@@ -188,10 +304,24 @@ class SessionPool:
         return False
 
     def list_names(self) -> list[str]:
-        dead = [k for k, s in self.sessions.items() if not s.is_alive()]
+        # Include tmux sessions that aren't yet attached
+        attached = set()
+        dead = []
+        for k, s in self.sessions.items():
+            if not s.is_alive():
+                dead.append(k)
+            else:
+                attached.add(k)
         for k in dead:
             del self.sessions[k]
-        return list(self.sessions.keys())
+
+        # Discover tmux sessions not yet in our pool
+        if HAS_TMUX:
+            for name in tmux_list_sessions():
+                if name not in attached:
+                    attached.add(name)
+
+        return sorted(attached)
 
     def kill_all(self):
         for s in self.sessions.values():
@@ -221,7 +351,7 @@ def _blocking_read(fd: int) -> bytes:
     if fd < 0:
         return b""
     try:
-        r, _, _ = select.select([fd], [], [], 0.1)
+        r, _, _ = select.select([fd], [], [], 0.05)
         if not r:
             return b""
         chunks = []
@@ -233,7 +363,6 @@ def _blocking_read(fd: int) -> bytes:
                     break
                 chunks.append(chunk)
                 total += len(chunk)
-                # Check if more data is immediately available
                 r, _, _ = select.select([fd], [], [], 0)
                 if not r:
                     break
@@ -249,20 +378,47 @@ def _blocking_read(fd: int) -> bytes:
 
 @app.on_event("startup")
 async def startup_event():
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     asyncio.create_task(_reap_loop())
+    if HAS_TMUX:
+        existing = tmux_list_sessions()
+        if existing:
+            log.info("Found %d existing tmux sessions: %s", len(existing), existing)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    log.info("Shutting down — killing all PTY sessions")
-    pool.kill_all()
+    log.info("Shutting down — detaching PTY sessions (tmux sessions persist)")
+    # Don't kill tmux sessions on shutdown — that's the whole point
+    for s in pool.sessions.values():
+        s._alive = False
+        if s.fd >= 0:
+            try:
+                os.close(s.fd)
+            except OSError:
+                pass
+        if s.pid > 0:
+            try:
+                os.kill(s.pid, signal.SIGTERM)
+            except (OSError, ChildProcessError):
+                pass
+    pool.sessions.clear()
 
 
 async def _reap_loop():
-    """Periodically reap dead sessions to avoid zombie processes."""
+    """Periodically reap dead sessions."""
     while True:
         pool.list_names()
         await asyncio.sleep(15)
+
+
+# ── Auth helper for REST endpoints ────────────────────
+
+def _check_auth(request: Request) -> bool:
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        token = request.query_params.get("token", "")
+    return users.verify_web_token(token)
 
 
 # ── Routes ────────────────────────────────────────────
@@ -274,12 +430,88 @@ async def index():
 
 @app.get("/health")
 async def health():
+    tmux_sessions = tmux_list_sessions() if HAS_TMUX else []
     return {
         "status": "ok",
         "sessions": len(pool.list_names()),
+        "tmux_sessions": tmux_sessions,
+        "tmux_available": HAS_TMUX,
         "uptime": round(time.time() - START_TIME),
     }
 
+
+# ── File upload/download ─────────────────────────────
+
+@app.post("/api/upload")
+async def upload_file(request: Request, file: UploadFile = File(...), path: str = Form("")):
+    if not _check_auth(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    # Determine target directory
+    target_dir = Path(path) if path else UPLOAD_DIR
+    if not target_dir.is_absolute():
+        target_dir = Path(os.path.expanduser("~")) / target_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Sanitize filename
+    safe_name = Path(file.filename).name
+    if not safe_name or safe_name.startswith('.'):
+        return JSONResponse({"error": "Invalid filename"}, status_code=400)
+
+    target = target_dir / safe_name
+    content = await file.read()
+    target.write_bytes(content)
+
+    return {"ok": True, "path": str(target), "size": len(content)}
+
+
+@app.get("/api/download")
+async def download_file(request: Request, path: str = ""):
+    if not _check_auth(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not path:
+        return JSONResponse({"error": "No path specified"}, status_code=400)
+
+    file_path = Path(path)
+    if not file_path.is_absolute():
+        file_path = Path(os.path.expanduser("~")) / file_path
+
+    if not file_path.exists() or not file_path.is_file():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    return FileResponse(file_path, filename=file_path.name)
+
+
+@app.get("/api/browse")
+async def browse_dir(request: Request, path: str = ""):
+    if not _check_auth(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    dir_path = Path(path) if path else Path(os.path.expanduser("~"))
+    if not dir_path.is_absolute():
+        dir_path = Path(os.path.expanduser("~")) / dir_path
+
+    if not dir_path.exists() or not dir_path.is_dir():
+        return JSONResponse({"error": "Directory not found"}, status_code=404)
+
+    entries = []
+    try:
+        for entry in sorted(dir_path.iterdir()):
+            if entry.name.startswith('.'):
+                continue
+            entries.append({
+                "name": entry.name,
+                "is_dir": entry.is_dir(),
+                "size": entry.stat().st_size if entry.is_file() else 0,
+            })
+    except PermissionError:
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
+
+    return {"path": str(dir_path), "entries": entries[:200]}
+
+
+# ── WebSocket ─────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -306,19 +538,27 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             session = pool.get(session_key)
             if not session:
-                try:
-                    await websocket.send_json({
-                        "type": "killed",
-                        "session": session_key,
-                        "sessions": pool.list_names(),
-                    })
-                except Exception:
-                    pass
-                break
+                # For tmux, try to re-attach if the session still exists
+                if HAS_TMUX and tmux_session_exists(session_key):
+                    agents_data = load_agents()
+                    cmd, cwd = build_session_cmd(session_key, agents_data)
+                    try:
+                        session = pool.spawn(session_key, cmd, cwd)
+                    except Exception:
+                        pass
+                if not session:
+                    try:
+                        await websocket.send_json({
+                            "type": "killed",
+                            "session": session_key,
+                            "sessions": pool.list_names(),
+                        })
+                    except Exception:
+                        pass
+                    break
             try:
                 data = await loop.run_in_executor(None, _blocking_read, session.fd)
                 if data:
-                    # Store in replay buffer for reconnect
                     session.append_replay(data)
                     await websocket.send_json({
                         "type": "output",
@@ -329,10 +569,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 break
 
     async def ping_loop():
-        """Send ping every 25 seconds to detect dead connections."""
+        """Send ping every 20 seconds to detect dead connections."""
         try:
             while True:
-                await asyncio.sleep(25)
+                await asyncio.sleep(20)
                 try:
                     await websocket.send_json({"type": "ping"})
                 except Exception:
@@ -340,7 +580,6 @@ async def websocket_endpoint(websocket: WebSocket):
         except asyncio.CancelledError:
             pass
 
-    # Start ping keepalive
     ping_task = asyncio.create_task(ping_loop())
 
     try:
@@ -350,11 +589,14 @@ async def websocket_endpoint(websocket: WebSocket):
             msg_type = msg.get("type")
 
             if msg_type == "pong":
-                # Client responded to our ping — connection is alive
                 continue
 
             elif msg_type == "list_sessions":
-                await websocket.send_json({"type": "sessions", "sessions": pool.list_names()})
+                await websocket.send_json({
+                    "type": "sessions",
+                    "sessions": pool.list_names(),
+                    "tmux": HAS_TMUX,
+                })
 
             elif msg_type == "list_agents":
                 agents = load_agents()
@@ -392,15 +634,25 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "attach":
                 name = msg.get("session", "")
                 session = pool.get(name)
+
+                # Auto-reattach to tmux session if not in pool
+                if not session and HAS_TMUX and tmux_session_exists(name):
+                    agents_data = load_agents()
+                    cmd, cwd = build_session_cmd(name, agents_data)
+                    try:
+                        session = pool.spawn(name, cmd, cwd)
+                    except Exception:
+                        pass
+
                 if not session:
                     await websocket.send_json({"type": "error", "message": f"Session '{name}' not found"})
                     continue
+
                 attached_session = name
                 if reader_task:
                     reader_task.cancel()
                 reader_task = asyncio.create_task(read_pty(name))
 
-                # Send replay buffer so client has terminal state on reconnect
                 replay = session.get_replay()
                 if replay:
                     await websocket.send_json({
@@ -452,8 +704,14 @@ def main():
     port = int(os.getenv("AGENTSTACK_PORT", "8765"))
 
     def _handle_signal(sig, frame):
-        pool.kill_all()
+        # Detach cleanly, don't kill tmux sessions
+        for s in pool.sessions.values():
+            s._alive = False
+            if s.fd >= 0:
+                try: os.close(s.fd)
+                except: pass
         sys.exit(0)
+
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
@@ -462,6 +720,10 @@ def main():
     print("=" * 40)
     print(f"  http://{host}:{port}")
     print(f"  Owner: {users.OWNER_ID}")
+    print(f"  tmux:  {'yes' if HAS_TMUX else 'no (sessions wont persist)'}")
+    existing = tmux_list_sessions() if HAS_TMUX else []
+    if existing:
+        print(f"  Existing sessions: {', '.join(existing)}")
     print()
     uvicorn.run(app, host=host, port=port, log_level="info")
 
