@@ -4,17 +4,23 @@ Your personal terminal, from Telegram. One machine, one bot, one owner, unlimite
 
 Open a full xterm.js terminal inside Telegram Mini App. Run Claude Code, bash, ssh — anything. Spawn multiple agent sessions with pre-configured prompts.
 
-## Quick Start (macOS)
+## Install
 
 ```bash
-git clone https://github.com/aidgoc/agentstack.git
-cd agentstack
-bash setup.sh
+curl -sL https://raw.githubusercontent.com/aidgoc/agentstack/main/install.sh | bash
 ```
 
-That's it. Installs deps, asks for your bot token, starts everything.
+That's it. One command. It installs everything, asks for your Telegram bot token, and starts.
 
 Need a bot token? Open [@BotFather](https://t.me/BotFather) on Telegram → `/newbot`.
+
+After install, manage with:
+```bash
+agentstack          # start
+agentstack stop     # stop
+agentstack logs     # view logs
+agentstack update   # pull latest
+```
 
 ## How It Works
 
