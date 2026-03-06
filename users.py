@@ -11,7 +11,7 @@ import secrets
 import time
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=False)
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = os.getenv("OWNER_ID", "")
