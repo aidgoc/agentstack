@@ -503,15 +503,31 @@ async def health():
 
 # ── File upload/download ─────────────────────────────
 
+_HOME = Path(os.path.expanduser("~")).resolve()
+
+
+def _safe_path(path: str, base: Path | None = None) -> Path | None:
+    """Resolve path and verify it stays within the home directory."""
+    root = base or _HOME
+    p = Path(path) if path else root
+    if not p.is_absolute():
+        p = _HOME / p
+    p = p.resolve()
+    try:
+        p.relative_to(_HOME)
+    except ValueError:
+        return None
+    return p
+
+
 @app.post("/api/upload")
 async def upload_file(request: Request, file: UploadFile = File(...), path: str = Form("")):
     if not _check_auth(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    # Determine target directory
-    target_dir = Path(path) if path else UPLOAD_DIR
-    if not target_dir.is_absolute():
-        target_dir = Path(os.path.expanduser("~")) / target_dir
+    target_dir = _safe_path(path) if path else UPLOAD_DIR.resolve()
+    if target_dir is None:
+        return JSONResponse({"error": "Path outside home directory"}, status_code=400)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitize filename
@@ -534,9 +550,9 @@ async def download_file(request: Request, path: str = ""):
     if not path:
         return JSONResponse({"error": "No path specified"}, status_code=400)
 
-    file_path = Path(path)
-    if not file_path.is_absolute():
-        file_path = Path(os.path.expanduser("~")) / file_path
+    file_path = _safe_path(path)
+    if file_path is None:
+        return JSONResponse({"error": "Path outside home directory"}, status_code=400)
 
     if not file_path.exists() or not file_path.is_file():
         return JSONResponse({"error": "File not found"}, status_code=404)
@@ -549,9 +565,9 @@ async def browse_dir(request: Request, path: str = ""):
     if not _check_auth(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    dir_path = Path(path) if path else Path(os.path.expanduser("~"))
-    if not dir_path.is_absolute():
-        dir_path = Path(os.path.expanduser("~")) / dir_path
+    dir_path = _safe_path(path) if path else _HOME
+    if dir_path is None:
+        return JSONResponse({"error": "Path outside home directory"}, status_code=400)
 
     if not dir_path.exists() or not dir_path.is_dir():
         return JSONResponse({"error": "Directory not found"}, status_code=404)

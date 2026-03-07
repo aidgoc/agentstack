@@ -5,8 +5,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Install cloudflared
-RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+# Install cloudflared (arch-aware)
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64|amd64)  CF_ARCH="amd64" ;; \
+        aarch64|arm64) CF_ARCH="arm64" ;; \
+        armv7l|armhf)  CF_ARCH="arm"   ;; \
+        *)             CF_ARCH="amd64" ;; \
+    esac && \
+    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
     -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
 # Install Claude Code CLI

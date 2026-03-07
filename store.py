@@ -23,7 +23,7 @@ _local = threading.local()
 
 def _conn():
     if not hasattr(_local, 'conn') or _local.conn is None:
-        c = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
