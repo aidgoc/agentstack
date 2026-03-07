@@ -1,4 +1,6 @@
 .env
+.mcp.json
+CLAUDE.md
 __pycache__/
 *.pyc
 *.db
