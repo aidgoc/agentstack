@@ -43,6 +43,8 @@ import termios
 import time
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, FileResponse, JSONResponse
@@ -92,7 +94,34 @@ def _sanitize_name(name: str) -> str:
     return _NAME_RE.sub('', name.lower().strip())[:32]
 
 
-app = FastAPI(title="AgentStack Terminal")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    asyncio.create_task(_reap_loop())
+    if HAS_TMUX:
+        existing = tmux_list_sessions()
+        if existing:
+            log.info("Found %d existing tmux sessions: %s", len(existing), existing)
+    yield
+    # Shutdown — detach PTY sessions, leave tmux sessions alive
+    log.info("Shutting down — detaching PTY sessions (tmux sessions persist)")
+    for s in pool.sessions.values():
+        s._alive = False
+        if s.fd >= 0:
+            try:
+                os.close(s.fd)
+            except OSError:
+                pass
+        if s.pid > 0:
+            try:
+                os.kill(s.pid, signal.SIGTERM)
+            except (OSError, ChildProcessError):
+                pass
+    pool.sessions.clear()
+
+
+app = FastAPI(title="AgentStack Terminal", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 # Replay buffer size per session (64KB for rich terminal state on reconnect)
@@ -415,36 +444,6 @@ def _blocking_read(fd: int) -> bytes:
         pass
     return b""
 
-
-# ── Lifecycle events ──────────────────────────────────
-
-@app.on_event("startup")
-async def startup_event():
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    asyncio.create_task(_reap_loop())
-    if HAS_TMUX:
-        existing = tmux_list_sessions()
-        if existing:
-            log.info("Found %d existing tmux sessions: %s", len(existing), existing)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    log.info("Shutting down — detaching PTY sessions (tmux sessions persist)")
-    # Don't kill tmux sessions on shutdown — that's the whole point
-    for s in pool.sessions.values():
-        s._alive = False
-        if s.fd >= 0:
-            try:
-                os.close(s.fd)
-            except OSError:
-                pass
-        if s.pid > 0:
-            try:
-                os.kill(s.pid, signal.SIGTERM)
-            except (OSError, ChildProcessError):
-                pass
-    pool.sessions.clear()
 
 
 async def _reap_loop():
