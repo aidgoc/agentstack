@@ -171,11 +171,12 @@ cd "$INSTALL_DIR"
 case "\${1:-start}" in
     start)   exec bash start.sh ;;
     stop)    kill \$(cat /tmp/agentstack/sentinel.pid 2>/dev/null) 2>/dev/null; pkill -f "web/server.py" 2>/dev/null; pkill -f "bot\.py" 2>/dev/null; pkill -f "cloudflared tunnel.*8765" 2>/dev/null; echo "Stopped." ;;
-    sentinel) exec bash sentinel.sh ;;
+    sentinel) bash sentinel.sh ;;
+    watch)    exec bash sentinel.sh --watch ;;
     logs)    tail -f /tmp/agentstack/*.log ;;
     health)  curl -s http://localhost:8765/health | python3 -m json.tool ;;
     update)  git pull origin main && pip install -q -r requirements.txt && echo "Updated. Run: agentstack start" ;;
-    *)       echo "Usage: agentstack [start|stop|sentinel|logs|health|update]" ;;
+    *)       echo "Usage: agentstack [start|stop|sentinel|watch|logs|health|update]" ;;
 esac
 SCRIPT
 chmod +x "$BIN_DIR/agentstack"
