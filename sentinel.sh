@@ -1,14 +1,36 @@
 #!/bin/bash
-# AgentStack Sentinel — monitors, heals, and alerts
+# ============================================================================
+# AgentStack Sentinel — watchdog that monitors, auto-heals, and alerts
+# ============================================================================
 #
 # Usage:
-#   bash sentinel.sh          # run in foreground
-#   bash sentinel.sh &        # run in background
-#   nohup bash sentinel.sh &  # survive terminal close
+#   bash sentinel.sh            # foreground
+#   nohup bash sentinel.sh &    # background (survives terminal close)
+#   agentstack sentinel         # via the agentstack command
 #
-# Monitors: web server, telegram bot, cloudflare tunnel, tmux, disk, memory
-# Auto-fixes: restarts crashed services, clears stale locks, fixes port conflicts
-# Alerts: sends Telegram messages on issues and recoveries
+# What it monitors (every 30 seconds):
+#   - Web server:  health endpoint + process alive
+#   - Telegram bot: process alive + 409 conflict detection
+#   - Cloudflare tunnel: process + URL reachability + URL sync
+#   - System (every 5 min): disk usage, memory, log size, tmux sessions
+#
+# Auto-fixes:
+#   - Restarts dead/unhealthy services
+#   - Clears stale Telegram polling (409 conflicts)
+#   - Re-establishes tunnels and syncs new URL to .env + Telegram menu
+#   - Rotates logs over 50MB
+#
+# Rate limiting:
+#   - Max 3 restarts per service per hour
+#   - After that, sends CRIT alert for manual intervention
+#
+# Alerts (via Telegram):
+#   - Startup/shutdown notifications
+#   - Warning on service issues
+#   - OK on recovery
+#   - Critical when auto-fix fails
+#   - Heartbeat every 30 minutes
+# ============================================================================
 
 set -u
 cd "$(dirname "$0")"
