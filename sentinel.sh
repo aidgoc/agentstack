@@ -124,9 +124,38 @@ check_tunnel() {
     if [ -n "$webapp_url" ]; then
         local tunnel_base
         tunnel_base=$(echo "$webapp_url" | sed 's|/static/.*||')
-        if ! curl -sf --max-time 10 "${tunnel_base}/health" > /dev/null 2>&1; then
-            echo "unreachable"
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${tunnel_base}/health" 2>/dev/null)
+        if [ "$http_code" = "000" ] || [ "$http_code" = "502" ] || [ "$http_code" = "503" ] || [ "$http_code" = "530" ]; then
+            # Process alive but URL dead — kill and restart
+            echo "url_dead"
             return
+        fi
+    fi
+
+    # Also verify the tunnel log URL matches .env (catches stale URL after process restart)
+    local log_url
+    log_url=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | tail -1)
+    if [ -n "$log_url" ] && [ -n "$webapp_url" ]; then
+        local env_base
+        env_base=$(echo "$webapp_url" | sed 's|/static/.*||')
+        if [ "$log_url" != "$env_base" ]; then
+            # Tunnel URL changed but .env wasn't updated
+            log "Tunnel URL mismatch: env=$env_base log=$log_url — syncing"
+            local new_webapp="${log_url}/static/terminal.html"
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                sed -i '' "s|AGENTSTACK_WEBAPP_URL=.*|AGENTSTACK_WEBAPP_URL=$new_webapp|" .env
+            else
+                sed -i "s|AGENTSTACK_WEBAPP_URL=.*|AGENTSTACK_WEBAPP_URL=$new_webapp|" .env
+            fi
+            # Update Telegram menu button
+            if [ -n "$BOT_TOKEN" ]; then
+                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setChatMenuButton" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"menu_button\":{\"type\":\"web_app\",\"text\":\"Terminal\",\"web_app\":{\"url\":\"${new_webapp}\"}}}" \
+                    > /dev/null 2>&1
+            fi
+            alert "INFO" "Tunnel URL synced: $log_url"
         fi
     fi
 
@@ -292,7 +321,7 @@ fix_tunnel() {
         return 1
     fi
 
-    alert "WARN" "Cloudflare tunnel $status. Restarting..."
+    alert "WARN" "Cloudflare tunnel $status. Restarting tunnel..."
 
     pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null
     sleep 2
