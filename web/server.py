@@ -335,7 +335,11 @@ class SessionPool:
                     os.kill(old.pid, signal.SIGTERM)
                 except (OSError, ChildProcessError):
                     pass
-        session = PtySession(key, cmd, cwd, env_extra)
+        try:
+            session = PtySession(key, cmd, cwd, env_extra)
+        except Exception:
+            self.sessions.pop(key, None)
+            raise
         self.sessions[key] = session
         return session
 
@@ -786,7 +790,7 @@ def main():
             s._alive = False
             if s.fd >= 0:
                 try: os.close(s.fd)
-                except: pass
+                except OSError: pass
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_signal)

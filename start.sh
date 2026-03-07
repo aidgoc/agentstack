@@ -129,8 +129,8 @@ cloudflared tunnel --url http://localhost:$PORT > "$LOG_DIR/tunnel.log" 2>&1 &
 CF_PID=$!
 
 TUNNEL_URL=""
-for i in $(seq 1 40); do
-    TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | head -1)
+for i in $(seq 1 120); do
+    TUNNEL_URL=$(grep -oi 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | head -1)
     [ -n "$TUNNEL_URL" ] && break
     sleep 0.5
 done
