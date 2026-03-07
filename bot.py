@@ -94,8 +94,7 @@ class AgentStackBot:
 
         keyboard = []
         if WEBAPP_URL:
-            token = users.make_web_token()
-            keyboard.append([InlineKeyboardButton("Open Terminal", web_app={"url": f"{WEBAPP_URL}?token={token}"})])
+            keyboard.append([InlineKeyboardButton("Open Terminal", web_app={"url": WEBAPP_URL})])
 
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
 
@@ -106,8 +105,7 @@ class AgentStackBot:
             return
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        token = users.make_web_token()
-        keyboard = [[InlineKeyboardButton("Open Terminal", web_app={"url": f"{WEBAPP_URL}?token={token}"})]]
+        keyboard = [[InlineKeyboardButton("Open Terminal", web_app={"url": WEBAPP_URL})]]
         await update.message.reply_text("Tap to open:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     @_owner_only

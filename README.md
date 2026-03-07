@@ -75,6 +75,22 @@ agentstack update     # pull latest code
 | `/hire <name>` | Create an agent |
 | `/done <id>` | Mark task done |
 
+## Security
+
+The terminal only works inside Telegram — it cannot be accessed from a regular browser:
+
+- When the Mini App opens, it sends `Telegram.WebApp.initData` to `/api/auth`
+- The server validates it with `HMAC-SHA256(key="WebAppData", bot_token)` — Telegram's own signature scheme — and checks the user ID matches `OWNER_ID`
+- Without a valid Telegram session the page shows a hard error and the terminal never loads
+- Session tokens expire after 4 hours and auto-refresh on reconnect
+- Sharing the URL with anyone else does nothing — they have no valid `initData`
+
+## OAuth / Browser Auth
+
+Any program that calls `xdg-open` with a URL (Claude auth, Figma MCP, etc.) gets that URL forwarded to you on Telegram. Tap the link on your phone to complete auth.
+
+> **Note on localhost OAuth callbacks:** Some tools redirect back to `http://localhost:PORT` after auth. The callback hits the server, not your phone, so you need to complete auth before the local callback server times out. The Telegram message warns you when this applies.
+
 ## Architecture
 
 ```
@@ -83,14 +99,15 @@ You (Telegram)
   v
 Telegram Bot (bot.py)
   |-- /start, /sh, /tasks, /team ...
-  |-- generates HMAC auth token
   v
 Telegram Mini App (terminal.html)
+  |-- sends initData to /api/auth (Telegram signature validation)
   |-- xterm.js + WebGL renderer
-  |-- WebSocket connection
+  |-- WebSocket connection with session token
   v
 FastAPI Server (web/server.py)
-  |-- WebSocket ↔ PTY sessions
+  |-- POST /api/auth: validates initData, issues session token
+  |-- WebSocket ↔ PTY sessions (token-authenticated)
   |-- tmux backend (session persistence)
   |-- 64KB replay buffer (reconnect recovery)
   |-- ping/pong keepalive (20s)
@@ -101,6 +118,7 @@ Cloudflare Tunnel (cloudflared)
   v
 Your Machine
   |-- bash, claude, ssh, python ...
+  |-- xdg-open interceptor → URLs forwarded to Telegram
 ```
 
 ## File Structure
@@ -111,8 +129,8 @@ agentstack/
 ├── setup.sh            # Git-clone installer (bash setup.sh)
 ├── start.sh            # Launches all services
 ├── sentinel.sh         # Watchdog: monitors, auto-heals, alerts
-├── bot.py              # Telegram bot (owner-only, HMAC auth)
-├── users.py            # Auth: HMAC tokens, owner verification
+├── bot.py              # Telegram bot (owner-only)
+├── users.py            # Auth: Telegram initData validation, session tokens
 ├── store.py            # SQLite: tasks, agents, goals, activity
 ├── agents.json         # Agent presets (prompts, models, MCP configs)
 ├── paperclip.py        # Paperclip API client (optional integration)

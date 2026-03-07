@@ -6,9 +6,11 @@ Only the OWNER_ID can use the bot or connect to terminals.
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
+import urllib.parse
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
@@ -45,6 +47,50 @@ def make_web_token() -> str:
     payload = f"{OWNER_ID}|{ts}|{nonce}"
     sig = hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()[:40]
     return f"{sig}|{ts}|{nonce}"
+
+
+def verify_init_data(init_data: str) -> bool:
+    """Verify Telegram WebApp initData. Returns True only if signature is valid and sender is owner.
+
+    Telegram signs initData with HMAC-SHA256 using a secret derived from the bot token.
+    This ensures the data genuinely came from Telegram and cannot be forged in a browser.
+    """
+    if not init_data or not BOT_TOKEN or not OWNER_ID:
+        return False
+    try:
+        params = {}
+        for part in init_data.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[urllib.parse.unquote(k)] = urllib.parse.unquote_plus(v)
+
+        received_hash = params.pop("hash", None)
+        if not received_hash:
+            return False
+
+        # Telegram spec: data_check_string = sorted key=value pairs joined by \n
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+
+        # secret_key = HMAC-SHA256(key="WebAppData", msg=bot_token)
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(received_hash, expected_hash):
+            return False
+
+        # Verify the user is the owner
+        user = json.loads(params.get("user", "{}"))
+        if str(user.get("id", "")) != OWNER_ID:
+            return False
+
+        # Reject stale initData (24h max, per Telegram recommendation)
+        auth_date = int(params.get("auth_date", 0))
+        if time.time() - auth_date > 86400:
+            return False
+
+        return True
+    except Exception:
+        return False
 
 
 def verify_web_token(token: str) -> bool:

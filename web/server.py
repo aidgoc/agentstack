@@ -470,6 +470,26 @@ async def index():
     return RedirectResponse("/static/terminal.html")
 
 
+@app.post("/api/auth")
+async def auth_endpoint(request: Request):
+    """Exchange Telegram initData for a short-lived session token.
+
+    The client sends the raw initData string from window.Telegram.WebApp.initData.
+    We validate it server-side using the bot token (cannot be forged without it).
+    Only the owner gets a token back.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    init_data = body.get("initData", "")
+    if not users.verify_init_data(init_data):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    return {"token": users.make_web_token()}
+
+
 @app.get("/health")
 async def health():
     tmux_sessions = tmux_list_sessions() if HAS_TMUX else []

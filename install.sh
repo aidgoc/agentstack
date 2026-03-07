@@ -158,6 +158,42 @@ EOL
     echo "  Saved"
 fi
 
+# ── xdg-open interceptor (Linux only) ───────────────
+# Intercepts browser URL opens from the terminal and sends them to Telegram.
+# Required for OAuth flows (Claude auth, Figma MCP, etc.) to work remotely.
+if [ "$PLATFORM" = "linux" ]; then
+    if ! grep -q "AgentStack" /usr/local/bin/xdg-open 2>/dev/null; then
+        echo "Installing xdg-open interceptor..."
+        _BOT=$(grep TELEGRAM_BOT_TOKEN .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+        _OWN=$(grep OWNER_ID .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+        sudo tee /usr/local/bin/xdg-open > /dev/null << XDGEOF
+#!/bin/bash
+# AgentStack xdg-open interceptor — sends URLs to Telegram instead of a browser.
+BOT_TOKEN="${_BOT}"
+CHAT_ID="${_OWN}"
+URL="\$1"
+if [[ "\$URL" =~ ^https?:// ]]; then
+    if [[ "\$URL" =~ redirect_uri=http ]]; then
+        MSG="Open this auth link. NOTE: redirect_uri points to localhost on this server — complete auth while the local callback server is still running.\n\n\$URL"
+    else
+        MSG="Open this link:\n\n\$URL"
+    fi
+    curl -s -X POST "https://api.telegram.org/bot\${BOT_TOKEN}/sendMessage" \
+        -d "chat_id=\${CHAT_ID}" --data-urlencode "text=\${MSG}" \
+        -d "disable_web_page_preview=false" > /dev/null 2>&1
+    echo "Link sent to Telegram." >&2
+    exit 0
+fi
+REAL="/usr/bin/xdg-open"
+[ -x "\$REAL" ] && exec "\$REAL" "\$@"
+echo "xdg-open: no browser available" >&2
+exit 1
+XDGEOF
+        sudo chmod +x /usr/local/bin/xdg-open
+        echo "  OK (browser links will be forwarded to Telegram)"
+    fi
+fi
+
 # ── Add to PATH ─────────────────────────────────────
 echo "[5/5] Setting up command..."
 
