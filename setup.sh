@@ -45,6 +45,27 @@ install_deps() {
             sudo npm install -g @anthropic-ai/claude-code 2>/dev/null || true
     fi
 
+    # Python version check (3.10+ required for type hint syntax)
+    PY_VER=$(python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "0.0")
+    PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+    PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+    if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+        echo ""
+        echo "ERROR: Python 3.10+ required (found $PY_VER)"
+        if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v apt-get &>/dev/null; then
+            echo "Installing Python 3.12 from deadsnakes PPA..."
+            sudo apt-get install -y -qq software-properties-common >/dev/null 2>&1
+            sudo add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
+            sudo apt-get install -y -qq python3.12 python3.12-venv >/dev/null 2>&1
+            sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.12 10 >/dev/null 2>&1
+        else
+            echo "Please install Python 3.10+ and re-run."
+            echo "  macOS: brew install python"
+            echo "  Ubuntu 20.04: sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.12"
+            exit 1
+        fi
+    fi
+
     # Python venv
     if [ ! -d ".venv" ]; then
         echo "Creating Python virtual environment..."
@@ -53,7 +74,7 @@ install_deps() {
     source .venv/bin/activate
     pip install -q -r requirements.txt
 
-    echo "  All dependencies OK"
+    echo "  All dependencies OK (Python $PY_VER)"
 }
 
 # ── Configure ─────────────────────────────────────────
@@ -86,6 +107,38 @@ OWNER_ID=$OWNER_ID
 EOL
 
     echo "Config saved to .env"
+}
+
+# ── Claude Code authentication ────────────────────────
+claude_auth() {
+    CLAUDE_AUTHED=false
+    for cred_path in "$HOME/.claude/.credentials.json" "$HOME/.claude/auth.json" "$HOME/.config/claude/credentials.json"; do
+        [ -f "$cred_path" ] && CLAUDE_AUTHED=true && break
+    done
+    grep -q "ANTHROPIC_API_KEY=." .env 2>/dev/null && CLAUDE_AUTHED=true
+
+    if [ "$CLAUDE_AUTHED" = true ]; then
+        echo "Claude Code: already authenticated"
+        return
+    fi
+
+    echo ""
+    echo "Claude Code needs authentication to run agents."
+    echo ""
+    echo "  Option A — API key (recommended for servers, no browser needed)"
+    echo "    Get one at: https://console.anthropic.com/settings/keys"
+    echo ""
+    read -p "  Paste Anthropic API key (or press Enter to skip): " ANTHROPIC_API_KEY_INPUT
+    if [ -n "$ANTHROPIC_API_KEY_INPUT" ]; then
+        grep -v "^ANTHROPIC_API_KEY=" .env > /tmp/.env_tmp 2>/dev/null && mv /tmp/.env_tmp .env || true
+        echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY_INPUT" >> .env
+        echo "  Saved."
+    else
+        echo ""
+        echo "  Skipped. After setup, SSH into this machine and run: claude"
+        echo "  Do NOT authenticate from inside the Telegram terminal (OAuth"
+        echo "  callback goes to localhost — must be done on the machine itself)."
+    fi
 }
 
 # ── xdg-open interceptor ─────────────────────────────
@@ -125,6 +178,7 @@ XDGEOF
 # ── Run ───────────────────────────────────────────────
 install_deps
 configure
+claude_auth
 install_xdg_interceptor
 
 echo ""

@@ -30,9 +30,21 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
             eval "$(/opt/homebrew/bin/brew shellenv)"
         fi
     fi
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux-musl"* ]]; then
     PLATFORM="linux"
     ARCH=$(uname -m)  # x86_64, aarch64, armv7l
+    # Detect package manager
+    if command -v apt-get &>/dev/null; then
+        PKG_MGR="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    elif command -v yum &>/dev/null; then
+        PKG_MGR="yum"
+    elif command -v pacman &>/dev/null; then
+        PKG_MGR="pacman"
+    else
+        PKG_MGR="unknown"
+    fi
 else
     echo "Unsupported platform: $OSTYPE"
     echo "AgentStack supports macOS and Linux."
@@ -53,25 +65,31 @@ if [ "$PLATFORM" = "mac" ]; then
     command -v cloudflared &>/dev/null || brew install cloudflare/cloudflare/cloudflared
 else
     # Linux — install system packages
-    NEED_APT=false
-    PKGS=""
-    command -v git &>/dev/null      || { NEED_APT=true; PKGS="$PKGS git"; }
-    command -v python3 &>/dev/null  || { NEED_APT=true; PKGS="$PKGS python3 python3-venv"; }
-    command -v tmux &>/dev/null     || { NEED_APT=true; PKGS="$PKGS tmux"; }
-    command -v curl &>/dev/null     || { NEED_APT=true; PKGS="$PKGS curl"; }
-
-    if [ "$NEED_APT" = true ]; then
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq $PKGS >/dev/null 2>&1
+    if [ "$PKG_MGR" = "apt" ]; then
+        PKGS=""
+        command -v git &>/dev/null      || PKGS="$PKGS git"
+        command -v python3 &>/dev/null  || PKGS="$PKGS python3 python3-venv"
+        command -v tmux &>/dev/null     || PKGS="$PKGS tmux"
+        command -v curl &>/dev/null     || PKGS="$PKGS curl"
+        if [ -n "$PKGS" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq $PKGS >/dev/null 2>&1
+        fi
+        # Node.js via NodeSource if not present
+        if ! command -v node &>/dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
+            sudo apt-get install -y -qq nodejs >/dev/null 2>&1
+        fi
+    elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
+        $PKG_MGR install -y -q git python3 tmux curl >/dev/null 2>&1 || true
+        command -v node &>/dev/null || { curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash - >/dev/null 2>&1; $PKG_MGR install -y nodejs >/dev/null 2>&1; } || true
+    elif [ "$PKG_MGR" = "pacman" ]; then
+        sudo pacman -Sy --noconfirm git python tmux curl nodejs npm >/dev/null 2>&1 || true
+    else
+        echo "  WARN: Unknown package manager. Ensure git, python3 (3.10+), tmux, curl, node are installed."
     fi
 
-    # Node.js
-    if ! command -v node &>/dev/null; then
-        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
-        sudo apt-get install -y -qq nodejs >/dev/null 2>&1
-    fi
-
-    # cloudflared — detect architecture
+    # cloudflared — binary install (works on all distros)
     if ! command -v cloudflared &>/dev/null; then
         echo "  Installing cloudflared..."
         case "$ARCH" in
@@ -85,7 +103,29 @@ else
     fi
 fi
 
-echo "  OK"
+# ── Python version check (3.10+ required) ───────────
+PY_VER=$(python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "0.0")
+PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+    echo ""
+    echo "  ERROR: Python 3.10+ required (found $PY_VER)"
+    if [ "$PLATFORM" = "linux" ] && [ "$PKG_MGR" = "apt" ]; then
+        echo "  Installing Python 3.12 from deadsnakes PPA..."
+        sudo apt-get install -y -qq software-properties-common >/dev/null 2>&1
+        sudo add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
+        sudo apt-get install -y -qq python3.12 python3.12-venv >/dev/null 2>&1
+        sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.12 10 >/dev/null 2>&1
+        echo "  Python 3.12 installed"
+    else
+        echo "  Please install Python 3.10+ and re-run this script."
+        echo "  macOS: brew install python"
+        echo "  Ubuntu 20.04: sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.12"
+        exit 1
+    fi
+fi
+
+echo "  OK (Python $PY_VER)"
 
 # ── Install Claude Code ─────────────────────────────
 echo "[2/5] Claude Code..."
@@ -156,6 +196,50 @@ TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 OWNER_ID=$OWNER_ID
 EOL
     echo "  Saved"
+fi
+
+# ── Claude Code authentication ──────────────────────
+# Claude Code requires auth before agents can run.
+# Users can authenticate with an API key (easy, works on servers)
+# or via OAuth (requires running 'claude' locally once).
+echo ""
+echo "Claude Code authentication..."
+CLAUDE_AUTHED=false
+# Check common credential locations
+for cred_path in "$HOME/.claude/.credentials.json" "$HOME/.claude/auth.json" "$HOME/.config/claude/credentials.json"; do
+    if [ -f "$cred_path" ]; then
+        CLAUDE_AUTHED=true
+        break
+    fi
+done
+# Also check if ANTHROPIC_API_KEY is already in .env
+if grep -q "ANTHROPIC_API_KEY=." .env 2>/dev/null; then
+    CLAUDE_AUTHED=true
+fi
+
+if [ "$CLAUDE_AUTHED" = true ]; then
+    echo "  Already authenticated"
+else
+    echo ""
+    echo "  Agents need Claude Code authenticated. Two options:"
+    echo ""
+    echo "  Option A — API key (works on any server, no browser needed)"
+    echo "    Get one at: https://console.anthropic.com/settings/keys"
+    echo ""
+    read -p "  Paste Anthropic API key (or press Enter to skip): " ANTHROPIC_API_KEY_INPUT
+    if [ -n "$ANTHROPIC_API_KEY_INPUT" ]; then
+        # Remove existing key if present, then append
+        grep -v "^ANTHROPIC_API_KEY=" .env > /tmp/.env_tmp 2>/dev/null && mv /tmp/.env_tmp .env || true
+        echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY_INPUT" >> .env
+        echo "  Saved to .env"
+    else
+        echo ""
+        echo "  Skipped. After install, run this to authenticate:"
+        echo "    ssh into this machine and run: claude"
+        echo "  Important: do NOT try to authenticate from inside the Telegram terminal."
+        echo "  The OAuth callback goes to localhost — it must be done locally."
+        echo ""
+    fi
 fi
 
 # ── xdg-open interceptor (Linux only) ───────────────
