@@ -94,10 +94,10 @@ check_status() {
 
 # ── Run ───────────────────────────────────────────────
 if [ "$WATCH_MODE" = true ]; then
-    echo "Sentinel watching (every 5 min). Ctrl+C to stop."
+    echo "Sentinel watching (every 1 hour). Ctrl+C to stop."
     while true; do
         check_status
-        sleep 300
+        sleep 3600
     done
 else
     check_status
