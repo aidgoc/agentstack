@@ -7,10 +7,13 @@ Only the OWNER_ID can use the bot or connect to terminals.
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
 import urllib.parse
+
+log = logging.getLogger("agentstack.auth")
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
@@ -66,6 +69,7 @@ def verify_init_data(init_data: str) -> bool:
 
         received_hash = params.pop("hash", None)
         if not received_hash:
+            log.warning("Auth: missing hash")
             return False
 
         # Telegram spec: data_check_string = sorted key=value pairs joined by \n
@@ -76,20 +80,24 @@ def verify_init_data(init_data: str) -> bool:
         expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(received_hash, expected_hash):
+            log.warning("Auth: invalid signature")
             return False
 
         # Verify the user is the owner
         user = json.loads(params.get("user", "{}"))
         if str(user.get("id", "")) != OWNER_ID:
+            log.warning("Auth: wrong user id %s", user.get("id"))
             return False
 
         # Reject stale initData (24h max, per Telegram recommendation)
         auth_date = int(params.get("auth_date", 0))
         if time.time() - auth_date > 86400:
+            log.warning("Auth: initData expired (%ds old)", int(time.time() - auth_date))
             return False
 
         return True
-    except Exception:
+    except Exception as e:
+        log.warning("Auth: exception %s", e)
         return False
 
 

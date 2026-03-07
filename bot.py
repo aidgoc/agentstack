@@ -115,6 +115,10 @@ class AgentStackBot:
             await update.message.reply_text("Usage: /sh <command>")
             return
 
+        if len(cmd_text) > 10000:
+            await update.message.reply_text("Command too long (max 10000 chars).")
+            return
+
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self._run_sh, cmd_text)

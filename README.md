@@ -77,13 +77,12 @@ agentstack update     # pull latest code
 
 ## Security
 
-The terminal only works inside Telegram — it cannot be accessed from a regular browser:
+The terminal is protected by Telegram's cryptographic authentication — it cannot be accessed from a regular browser even if someone has the Cloudflare tunnel URL:
 
-- When the Mini App opens, it sends `Telegram.WebApp.initData` to `/api/auth`
-- The server validates it with `HMAC-SHA256(key="WebAppData", bot_token)` — Telegram's own signature scheme — and checks the user ID matches `OWNER_ID`
-- Without a valid Telegram session the page shows a hard error and the terminal never loads
-- Session tokens expire after 4 hours and auto-refresh on reconnect
-- Sharing the URL with anyone else does nothing — they have no valid `initData`
+- **Telegram HMAC-SHA256 validation:** When the Mini App opens, it sends `Telegram.WebApp.initData` to `/api/auth`. The server validates the signature using `HMAC-SHA256(key="WebAppData", bot_token)` — Telegram's own signed-data scheme. This signature can only be produced by Telegram's servers, not forged in a browser.
+- **Owner-only access:** Even a valid Telegram signature is not enough. The server also checks that the user ID inside `initData` exactly matches `OWNER_ID`. Only the configured owner can open a terminal session — no one else.
+- **URL sharing is useless:** Even if someone discovers the Cloudflare tunnel URL, opening it in a browser shows a hard error and the terminal never loads. There is no login form, no password prompt — without a genuine Telegram session as the owner, access is impossible.
+- Session tokens expire after 4 hours and auto-refresh on reconnect.
 
 ## OAuth / Browser Auth
 
