@@ -259,6 +259,11 @@ class PtySession:
             if not tmux_session_exists(name):
                 tmux_create_session(name, cmd, self.cwd, env_extra)
                 time.sleep(0.3)
+                # Wait for tmux session to be ready before mirroring
+                for _ in range(6):
+                    if tmux_session_exists(name):
+                        break
+                    time.sleep(0.2)
                 mirror_to_wave(name)
 
             # Attach to tmux session via PTY
