@@ -185,14 +185,28 @@ def tmux_kill_session(name: str):
         pass
 
 
+_WSH_PATHS = [
+    shutil.which("wsh"),
+    os.path.expanduser("~/.local/share/waveterm/bin/wsh"),
+    os.path.expanduser("~/snap/waveterm/current/.local/share/waveterm/bin/wsh"),
+]
+# Find wsh at startup (snap installs it outside PATH)
+for _p in _WSH_PATHS:
+    if _p and os.path.isfile(_p):
+        WSH_BIN = _p
+        break
+else:
+    WSH_BIN = None
+
+
 def mirror_to_wave(session_name: str) -> bool:
     """Mirror a tmux session to a Wave terminal block if Wave is running.
 
     Returns True if Wave was found and wsh was invoked, False otherwise.
     Silently skips if Wave is not running or wsh is not available.
     """
-    if shutil.which("wsh") is None:
-        log.debug("wsh not in PATH — skipping Wave mirror")
+    if not WSH_BIN:
+        log.debug("wsh not found — skipping Wave mirror")
         return False
     try:
         result = subprocess.run(
@@ -208,7 +222,7 @@ def mirror_to_wave(session_name: str) -> bool:
     sess = tmux_session_name(session_name)
     try:
         subprocess.Popen(
-            ["wsh", "run", "--", "tmux", "attach", "-t", sess],
+            [WSH_BIN, "run", "--", "tmux", "attach", "-t", sess],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -268,6 +282,9 @@ class PtySession:
                     time.sleep(0.2)
                 if ready:
                     mirror_to_wave(name)
+            else:
+                # Session already exists — mirror to Wave on re-attach too
+                mirror_to_wave(name)
 
             # Attach to tmux session via PTY
             attach_cmd = ["tmux", "attach", "-t", tmux_session_name(name)]
@@ -514,6 +531,50 @@ def _check_auth(request: Request) -> bool:
 @app.get("/")
 async def index():
     return RedirectResponse("/static/terminal.html")
+
+
+@app.get("/office")
+async def office():
+    html_path = os.path.join(os.path.dirname(__file__), "static", "office.html")
+    return FileResponse(html_path)
+
+
+def _cwd_to_transcript_dir(cwd: str) -> str:
+    """Convert agent cwd to Claude transcript directory path."""
+    encoded = cwd.replace("/", "-")
+    return os.path.expanduser(f"~/.claude/projects/{encoded}")
+
+
+def _get_office_agents():
+    """Build agent state snapshot from agents.json."""
+    agents_data = {}
+    try:
+        with open(AGENTS_FILE) as f:
+            agents_data = json.load(f).get("agents", {})
+    except Exception:
+        pass
+
+    result = []
+    for short_name, cfg in agents_data.items():
+        cwd = cfg.get("cwd", "")
+        transcript_dir = _cwd_to_transcript_dir(cwd) if cwd else ""
+        result.append({
+            "short_name": short_name,
+            "name": short_name.capitalize(),
+            "role": cfg.get("description", "")[:60],
+            "cwd": cwd,
+            "transcript_dir": transcript_dir,
+            "activity": "idle",
+            "current_tool": None,
+            "task_id": None,
+            "task_title": None,
+        })
+    return result
+
+
+@app.get("/api/office/agents")
+async def office_agents():
+    return {"agents": _get_office_agents()}
 
 
 @app.post("/api/auth")
