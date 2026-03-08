@@ -25,6 +25,7 @@ Usage:
 """
 
 import asyncio
+import glob as glob_mod
 import json
 import logging
 import os
@@ -564,6 +565,91 @@ def _get_office_agents():
             "task_title": None,
         })
     return result
+
+
+class AgentActivityTracker:
+    """Watches Claude Code JSONL transcripts to detect tool_use events."""
+
+    TOOL_ANIMATION = {
+        "Write": "typing", "Edit": "typing", "NotebookEdit": "typing",
+        "Read": "reading", "Glob": "reading", "Grep": "reading", "LS": "reading",
+        "Bash": "running", "BashOutput": "running",
+        "WebSearch": "searching", "WebFetch": "searching",
+    }
+    IDLE_TIMEOUT = 5.0  # seconds
+
+    def __init__(self):
+        self._positions = {}   # transcript_path -> file byte offset
+        self._last_event = {}  # short_name -> timestamp
+        self._state = {}       # short_name -> {"activity": str, "tool": str|None}
+
+    def _find_latest_jsonl(self, transcript_dir: str):
+        """Return path to most recently modified .jsonl in transcript_dir."""
+        if not os.path.isdir(transcript_dir):
+            return None
+        files = glob_mod.glob(os.path.join(transcript_dir, "*.jsonl"))
+        if not files:
+            return None
+        return max(files, key=os.path.getmtime)
+
+    def _read_new_lines(self, path: str) -> list:
+        """Read only new lines since last read (tail -f style)."""
+        pos = self._positions.get(path, 0)
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                end = f.tell()
+                if end < pos:
+                    pos = 0  # file rotated/truncated, restart from beginning
+                f.seek(pos)
+                data = f.read()
+            self._positions[path] = end
+            return data.decode("utf-8", errors="ignore").splitlines()
+        except Exception:
+            return []
+
+    def poll(self, agents: list) -> list:
+        """Poll all agents, return updated state list with activity fields."""
+        now = time.time()
+        updated = []
+        for agent in agents:
+            short_name = agent["short_name"]
+            transcript_dir = agent.get("transcript_dir", "")
+
+            path = self._find_latest_jsonl(transcript_dir) if transcript_dir else None
+            tool_found = None
+
+            if path:
+                lines = self._read_new_lines(path)
+                for line in lines:
+                    try:
+                        d = json.loads(line)
+                        if d.get("type") == "assistant":
+                            content = d.get("message", {}).get("content", [])
+                            for c in content:
+                                if c.get("type") == "tool_use":
+                                    tool_found = c.get("name")
+                                    break
+                    except Exception:
+                        pass
+
+            if tool_found:
+                self._last_event[short_name] = now
+                activity = self.TOOL_ANIMATION.get(tool_found, "working")
+                self._state[short_name] = {"activity": activity, "tool": tool_found}
+            else:
+                last = self._last_event.get(short_name, 0)
+                if now - last > self.IDLE_TIMEOUT:
+                    self._state[short_name] = {"activity": "idle", "tool": None}
+
+            state = self._state.get(short_name, {"activity": "idle", "tool": None})
+            updated.append({**agent, "activity": state["activity"], "current_tool": state["tool"]})
+
+        return updated
+
+
+_activity_tracker = AgentActivityTracker()
+_office_clients: set = set()
 
 
 @app.get("/api/office/agents")
