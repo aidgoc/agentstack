@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,51 @@ OWNER_ID = os.getenv("OWNER_ID", "")
 WEBAPP_URL = os.getenv("AGENTSTACK_WEBAPP_URL", "")
 
 MAX_MSG_LEN = 4000
+
+TMUX_PREFIX = "as_"
+
+
+def _tmux_session_name(name: str) -> str:
+    return f"{TMUX_PREFIX}{name}"
+
+
+def _tmux_list_sessions() -> list[str]:
+    """List active AgentStack tmux sessions."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5
+        )
+        names = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith(TMUX_PREFIX):
+                names.append(line[len(TMUX_PREFIX):])
+        return names
+    except Exception:
+        return []
+
+
+def _mirror_to_wave(session_name: str) -> bool:
+    """Mirror a tmux session to Wave terminal. Returns True if invoked."""
+    if shutil.which("wsh") is None:
+        return False
+    try:
+        result = subprocess.run(["pgrep", "wavesrv"], capture_output=True, timeout=3)
+        if result.returncode != 0:
+            return False
+    except Exception:
+        return False
+    sess = _tmux_session_name(session_name)
+    try:
+        subprocess.Popen(
+            ["wsh", "run", "--", "tmux", "attach", "-t", sess],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _owner_only(handler):
@@ -305,6 +351,29 @@ class AgentStackBot:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    @_owner_only
+    async def _handle_wave(self, update, context):
+        """Mirror the most recent active tmux session to Wave terminal."""
+        if shutil.which("wsh") is None:
+            await update.message.reply_text("❌ `wsh` not found in PATH.", parse_mode="Markdown")
+            return
+
+        result = subprocess.run(["pgrep", "wavesrv"], capture_output=True)
+        if result.returncode != 0:
+            await update.message.reply_text("❌ Wave terminal is not running.")
+            return
+
+        sessions = _tmux_list_sessions()
+        if not sessions:
+            await update.message.reply_text("No active terminal sessions.")
+            return
+
+        name = sessions[-1]
+        if _mirror_to_wave(name):
+            await update.message.reply_text(f"✅ Opened `{name}` in Wave.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Failed to open Wave block.")
+
     # ── Run ───────────────────────────────────────────
 
     def run(self):
@@ -333,6 +402,7 @@ class AgentStackBot:
             "activity": self._handle_activity,
             "comment": self._handle_comment,
             "done": self._handle_done,
+            "wave": self._handle_wave,
         }.items():
             self._app.add_handler(CommandHandler(cmd, handler))
 
