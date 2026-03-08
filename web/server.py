@@ -100,6 +100,7 @@ async def lifespan(app: FastAPI):
     # Startup
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     asyncio.create_task(_reap_loop())
+    asyncio.create_task(_office_broadcast_loop())
     if HAS_TMUX:
         existing = tmux_list_sessions()
         if existing:
@@ -774,6 +775,51 @@ async def browse_dir(request: Request, path: str = ""):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
 
     return {"path": str(dir_path), "entries": entries[:200]}
+
+
+# ── Office WebSocket broadcast ────────────────────────
+
+async def _office_broadcast_loop():
+    """Push agent state updates to all connected office clients every 2s."""
+    while True:
+        await asyncio.sleep(2)
+        if not _office_clients:
+            continue
+        try:
+            agents = _get_office_agents()
+            polled = _activity_tracker.poll(agents)
+            msg = {"type": "update", "agents": polled}
+            dead = set()
+            for ws in list(_office_clients):
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    dead.add(ws)
+            _office_clients -= dead
+        except Exception as e:
+            log.warning("Office broadcast error: %s", e)
+
+
+@app.websocket("/ws/office")
+async def office_ws(websocket: WebSocket):
+    await websocket.accept()
+    _office_clients.add(websocket)
+    log.info("Office WS connected, total=%d", len(_office_clients))
+    try:
+        # Send initial snapshot immediately on connect
+        agents = _get_office_agents()
+        polled = _activity_tracker.poll(agents)
+        await websocket.send_json({"type": "snapshot", "agents": polled})
+        # Keep alive — ping every 30s, browser ponds implicitly
+        while True:
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _office_clients.discard(websocket)
 
 
 # ── WebSocket ─────────────────────────────────────────
