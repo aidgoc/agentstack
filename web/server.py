@@ -185,6 +185,40 @@ def tmux_kill_session(name: str):
         pass
 
 
+def mirror_to_wave(session_name: str) -> bool:
+    """Mirror a tmux session to a Wave terminal block if Wave is running.
+
+    Returns True if Wave was found and wsh was invoked, False otherwise.
+    Silently skips if Wave is not running or wsh is not available.
+    """
+    if shutil.which("wsh") is None:
+        log.debug("wsh not in PATH — skipping Wave mirror")
+        return False
+    try:
+        result = subprocess.run(
+            ["pgrep", "wavesrv"],
+            capture_output=True, timeout=3
+        )
+        if result.returncode != 0:
+            log.debug("Wave not running — skipping mirror")
+            return False
+    except Exception:
+        return False
+
+    sess = tmux_session_name(session_name)
+    try:
+        subprocess.Popen(
+            ["wsh", "run", "--", "tmux", "attach", "-t", sess],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("Mirrored session '%s' to Wave", sess)
+        return True
+    except Exception as e:
+        log.warning("Wave mirror failed for '%s': %s", sess, e)
+        return False
+
+
 def tmux_session_exists(name: str) -> bool:
     """Check if a tmux session exists."""
     sess = tmux_session_name(name)
@@ -225,6 +259,7 @@ class PtySession:
             if not tmux_session_exists(name):
                 tmux_create_session(name, cmd, self.cwd, env_extra)
                 time.sleep(0.3)
+                mirror_to_wave(name)
 
             # Attach to tmux session via PTY
             attach_cmd = ["tmux", "attach", "-t", tmux_session_name(name)]
