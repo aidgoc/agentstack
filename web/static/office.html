@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentStack Office</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #e6edf3; font-family: monospace; display: flex; height: 100vh; overflow: hidden; }
+  #sidebar { width: 280px; background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; flex-shrink: 0; }
+  #sidebar h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 2px; color: #7d8590; margin-bottom: 16px; }
+  #detail-panel { display: none; }
+  #detail-panel.visible { display: block; }
+  #detail-name { font-size: 16px; font-weight: bold; color: #f0f6fc; margin-bottom: 4px; }
+  #detail-role { font-size: 11px; color: #7d8590; margin-bottom: 12px; line-height: 1.4; }
+  .detail-card { background: #21262d; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+  .detail-card .label { color: #7d8590; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .activity-row { padding: 3px 0; color: #8b949e; border-bottom: 1px solid #30363d; font-size: 12px; }
+  .activity-row:last-child { border: none; }
+  #canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #0d1117; }
+  canvas { image-rendering: pixelated; cursor: pointer; }
+  #status-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #161b22; border-top: 1px solid #30363d; padding: 4px 12px; font-size: 11px; color: #7d8590; display: flex; gap: 16px; }
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .dot.connected { background: #3fb950; }
+  .dot.disconnected { background: #f85149; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>Agent Office</h2>
+  <div id="detail-panel">
+    <div id="detail-name">—</div>
+    <div id="detail-role">—</div>
+    <div class="detail-card">
+      <div class="label">Current Task</div>
+      <div id="detail-task-text" style="font-size:12px;color:#c9d1d9;">No task assigned</div>
+    </div>
+    <div class="detail-card">
+      <div class="label">Activity</div>
+      <div id="detail-activity-list"></div>
+    </div>
+  </div>
+  <div id="empty-hint" style="color:#7d8590;font-size:12px;margin-top:8px;">Click a character to inspect</div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="office" width="640" height="384"></canvas>
+</div>
+
+<div id="status-bar">
+  <span><span class="dot disconnected" id="ws-dot"></span><span id="ws-status">Connecting...</span></span>
+  <span id="agent-count">0 agents</span>
+</div>
+
+<script>
+// ── Constants ─────────────────────────────────────────
+const TILE = 32;
+const COLS = 20;
+const ROWS = 12;
+const canvas = document.getElementById('office');
+const ctx = canvas.getContext('2d');
+
+const ROLE_COLORS = {
+  researcher: '#3b82f6',
+  writer:     '#22c55e',
+  general:    '#22c55e',
+  engineer:   '#f97316',
+  designer:   '#a855f7',
+  crm:        '#f43f5e',
+  analyst:    '#06b6d4',
+};
+
+const TOOL_LABELS = {
+  typing:    'Writing...',
+  reading:   'Reading...',
+  running:   'Running cmd...',
+  searching: 'Searching...',
+  working:   'Working...',
+  idle:      null,
+};
+
+// Desk positions: [tile_x, tile_y] — 3 columns, 3 rows inside the walls
+const DESK_POSITIONS = [
+  [2,2],[7,2],[12,2],
+  [2,5],[7,5],[12,5],
+  [2,8],[7,8],[12,8],
+];
+
+function agentColor(agent) {
+  const desc = (agent.role || '').toLowerCase();
+  if (desc.includes('research') || desc.includes('trend') || desc.includes('analyst') || desc.includes('financ')) return ROLE_COLORS.researcher;
+  if (desc.includes('financ') || desc.includes('business')) return ROLE_COLORS.analyst;
+  if (desc.includes('write') || desc.includes('copy') || desc.includes('social') || desc.includes('market')) return ROLE_COLORS.writer;
+  if (desc.includes('develop') || desc.includes('code') || desc.includes('engineer')) return ROLE_COLORS.engineer;
+  if (desc.includes('design')) return ROLE_COLORS.designer;
+  if (desc.includes('crm') || desc.includes('contact')) return ROLE_COLORS.crm;
+  return ROLE_COLORS.general;
+}
+
+// ── State ─────────────────────────────────────────────
+let agents = [];
+let selectedAgent = null;
+let tick = 0;
+
+// ── Drawing ───────────────────────────────────────────
+
+function drawFloor() {
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      ctx.fillStyle = (r + c) % 2 === 0 ? '#1a1f2e' : '#1e2435';
+      ctx.fillRect(c * TILE, r * TILE, TILE, TILE);
+    }
+  }
+}
+
+function drawWalls() {
+  ctx.fillStyle = '#2d3748';
+  for (let c = 0; c < COLS; c++) {
+    ctx.fillRect(c * TILE, 0, TILE, TILE);
+    ctx.fillRect(c * TILE, (ROWS-1) * TILE, TILE, TILE);
+  }
+  for (let r = 0; r < ROWS; r++) {
+    ctx.fillRect(0, r * TILE, TILE, TILE);
+    ctx.fillRect((COLS-1) * TILE, r * TILE, TILE, TILE);
+  }
+  ctx.fillStyle = '#4a5568';
+  ctx.fillRect(0, 0, COLS * TILE, 4);
+}
+
+function drawDesk(tx, ty, agent) {
+  const x = tx * TILE, y = ty * TILE;
+  const color = agentColor(agent);
+  const selected = selectedAgent && selectedAgent.short_name === agent.short_name;
+
+  // Desk surface
+  ctx.fillStyle = selected ? '#2d3748' : '#1e2a3a';
+  ctx.fillRect(x, y + 8, TILE * 2, 20);
+  ctx.fillStyle = selected ? '#4a5568' : '#2d4a6a';
+  ctx.fillRect(x, y + 8, TILE * 2, 3);
+
+  // Monitor
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(x + 8, y - 2, 24, 16);
+  ctx.fillStyle = agent.activity !== 'idle' ? color : '#1f2937';
+  ctx.fillRect(x + 10, y, 20, 12);
+
+  // Desk legs
+  ctx.fillStyle = '#374151';
+  ctx.fillRect(x + 2, y + 26, 4, 6);
+  ctx.fillRect(x + TILE * 2 - 6, y + 26, 4, 6);
+
+  // Agent name label
+  ctx.fillStyle = color;
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(agent.short_name, x + TILE, y + 38);
+}
+
+function drawCharacter(tx, ty, agent) {
+  const x = tx * TILE + 8;
+  const y = ty * TILE - 16;
+  const color = agentColor(agent);
+  const selected = selectedAgent && selectedAgent.short_name === agent.short_name;
+  const idx = agents.indexOf(agent);
+
+  const bobY = agent.activity === 'idle' ? Math.sin(tick * 0.05 + idx * 1.3) * 1.5 : 0;
+  const tapY = agent.activity === 'typing' ? Math.sin(tick * 0.3) * 2 : 0;
+  const cy = y + bobY + tapY;
+
+  if (selected) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x + 8, cy + 12, 12, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Head (skin)
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillRect(x + 4, cy, 8, 8);
+  // Hair (role color)
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 4, cy, 8, 3);
+  ctx.fillRect(x + 4, cy + 3, 2, 2);
+  // Eyes
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(x + 6, cy + 3, 2, 2);
+  ctx.fillRect(x + 9, cy + 3, 2, 2);
+  // Torso
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 3, cy + 9, 10, 8);
+  // Arms
+  const armsForward = agent.activity === 'typing';
+  ctx.fillRect(x + 1, cy + (armsForward ? 10 : 9), 3, armsForward ? 5 : 6);
+  ctx.fillRect(x + 12, cy + (armsForward ? 10 : 9), 3, armsForward ? 5 : 6);
+  // Legs
+  ctx.fillStyle = '#374151';
+  ctx.fillRect(x + 4, cy + 17, 4, 6);
+  ctx.fillRect(x + 8, cy + 17, 4, 6);
+}
+
+function drawSpeechBubble(tx, ty, agent) {
+  const label = agent.activity !== 'idle' ? TOOL_LABELS[agent.activity] : null;
+  const text = label || agent.short_name;
+
+  const x = tx * TILE + TILE;
+  const y = ty * TILE - 28;
+  const color = agentColor(agent);
+
+  ctx.font = '7px monospace';
+  const tw = ctx.measureText(text).width;
+  const w = tw + 8, h = 12;
+  const bx = x - w / 2, by = y - h;
+
+  // Bubble background
+  ctx.fillStyle = agent.activity !== 'idle' ? '#152015' : '#1a1f2e';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(bx, by, w, h, 3);
+  ctx.fill();
+  ctx.stroke();
+
+  // Bubble tail
+  ctx.fillStyle = agent.activity !== 'idle' ? '#152015' : '#1a1f2e';
+  ctx.beginPath();
+  ctx.moveTo(x - 2, by + h - 1);
+  ctx.lineTo(x + 2, by + h - 1);
+  ctx.lineTo(x, by + h + 4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(x - 2, by + h - 1);
+  ctx.lineTo(x, by + h + 4);
+  ctx.lineTo(x + 2, by + h - 1);
+  ctx.stroke();
+
+  // Text
+  ctx.fillStyle = agent.activity !== 'idle' ? color : '#7d8590';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, x, by + 8);
+}
+
+function drawActivityGlow(tx, ty, agent) {
+  if (agent.activity === 'idle') return;
+  const color = agentColor(agent);
+  const x = tx * TILE + TILE, y = ty * TILE;
+  const alpha = 0.08 + 0.06 * Math.sin(tick * 0.1);
+  const alphaHex = Math.round(alpha * 255).toString(16).padStart(2, '0');
+  const gradient = ctx.createRadialGradient(x, y, 0, x, y, 30);
+  gradient.addColorStop(0, color + alphaHex);
+  gradient.addColorStop(1, color + '00');
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, 30, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ── Game Loop ─────────────────────────────────────────
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawFloor();
+  drawWalls();
+  agents.forEach((agent, i) => {
+    if (i >= DESK_POSITIONS.length) return;
+    const [tx, ty] = DESK_POSITIONS[i];
+    drawActivityGlow(tx, ty, agent);
+    drawDesk(tx, ty, agent);
+    drawCharacter(tx, ty, agent);
+    drawSpeechBubble(tx, ty, agent);
+  });
+  tick++;
+  requestAnimationFrame(render);
+}
+
+// ── Click Handling ────────────────────────────────────
+
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+
+  let clicked = null;
+  agents.forEach((agent, i) => {
+    if (i >= DESK_POSITIONS.length) return;
+    const [tx, ty] = DESK_POSITIONS[i];
+    const cx = tx * TILE + TILE, cy = ty * TILE;
+    if (Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2) < 24) clicked = agent;
+  });
+
+  selectedAgent = clicked;
+  if (clicked) showDetail(clicked); else hideDetail();
+});
+
+function showDetail(agent) {
+  document.getElementById('detail-panel').classList.add('visible');
+  document.getElementById('empty-hint').style.display = 'none';
+  document.getElementById('detail-name').textContent = agent.short_name.toUpperCase();
+  document.getElementById('detail-role').textContent = agent.role || 'Agent';
+  document.getElementById('detail-task-text').textContent =
+    agent.task_title ? (agent.task_id + ' — ' + agent.task_title) : 'No task assigned';
+
+  const list = document.getElementById('detail-activity-list');
+  list.replaceChildren();
+  const row = document.createElement('div');
+  row.className = 'activity-row';
+  if (agent.activity !== 'idle') {
+    row.style.color = agentColor(agent);
+    row.textContent = '\u25B6 ' + (agent.current_tool || agent.activity);
+  } else {
+    row.textContent = 'Idle';
+  }
+  list.appendChild(row);
+}
+
+function hideDetail() {
+  document.getElementById('detail-panel').classList.remove('visible');
+  document.getElementById('empty-hint').style.display = 'block';
+}
+
+// ── WebSocket ─────────────────────────────────────────
+
+let ws;
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/office');
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').className = 'dot connected';
+    document.getElementById('ws-status').textContent = 'Live';
+  };
+
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'ping') return;
+    if (data.agents) {
+      agents = data.agents;
+      document.getElementById('agent-count').textContent = agents.length + ' agents';
+      if (selectedAgent) {
+        const updated = agents.find(a => a.short_name === selectedAgent.short_name);
+        if (updated) { selectedAgent = updated; showDetail(updated); }
+      }
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').className = 'dot disconnected';
+    document.getElementById('ws-status').textContent = 'Reconnecting...';
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+connectWS();
+render();
+</script>
+</body>
+</html>
