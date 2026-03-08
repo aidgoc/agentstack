@@ -353,7 +353,7 @@ class AgentStackBot:
 
     @_owner_only
     async def _handle_wave(self, update, context):
-        """Mirror the most recent active tmux session to Wave terminal."""
+        """Mirror the last created tmux session to Wave terminal."""
         if shutil.which("wsh") is None:
             await update.message.reply_text("❌ `wsh` not found in PATH.", parse_mode="Markdown")
             return
@@ -370,7 +370,7 @@ class AgentStackBot:
 
         name = sessions[-1]
         if _mirror_to_wave(name):
-            await update.message.reply_text(f"✅ Opened `{name}` in Wave.", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ Sent `{name}` to Wave — check your desktop.", parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Failed to open Wave block.")
 
