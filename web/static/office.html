@@ -89,8 +89,8 @@ const DESK_POSITIONS = [
 
 function agentColor(agent) {
   const desc = (agent.role || '').toLowerCase();
-  if (desc.includes('research') || desc.includes('trend') || desc.includes('analyst') || desc.includes('financ')) return ROLE_COLORS.researcher;
   if (desc.includes('financ') || desc.includes('business')) return ROLE_COLORS.analyst;
+  if (desc.includes('research') || desc.includes('trend')) return ROLE_COLORS.researcher;
   if (desc.includes('write') || desc.includes('copy') || desc.includes('social') || desc.includes('market')) return ROLE_COLORS.writer;
   if (desc.includes('develop') || desc.includes('code') || desc.includes('engineer')) return ROLE_COLORS.engineer;
   if (desc.includes('design')) return ROLE_COLORS.designer;
@@ -337,7 +337,8 @@ function connectWS() {
   };
 
   ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
     if (data.type === 'ping') return;
     if (data.agents) {
       agents = data.agents;
