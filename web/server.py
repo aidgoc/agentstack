@@ -547,13 +547,7 @@ def _cwd_to_transcript_dir(cwd: str) -> str:
 
 def _get_office_agents():
     """Build agent state snapshot from agents.json."""
-    agents_data = {}
-    try:
-        with open(AGENTS_FILE) as f:
-            agents_data = json.load(f).get("agents", {})
-    except Exception:
-        pass
-
+    agents_data = load_agents()
     result = []
     for short_name, cfg in agents_data.items():
         cwd = cfg.get("cwd", "")
