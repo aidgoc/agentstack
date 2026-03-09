@@ -7,9 +7,12 @@ services:
     ports:
       - "8765:8765"
     volumes:
-      # Persist shared workspace
+      # Persist shared workspace (agent outputs)
       - ./shared:/app/shared
-      # Mount Claude Code config (API key, settings)
+      # Mount Claude Code auth (API key or OAuth credentials)
       - ~/.claude:/root/.claude
+      # Override generated configs if customized
+      - ./agents.json:/app/agents.json
+      - ./mcp-configs:/app/mcp-configs
     environment:
       - AGENTSTACK_PORT=8765
