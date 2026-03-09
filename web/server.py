@@ -460,6 +460,10 @@ def build_session_cmd(name: str, agents: dict) -> tuple[list[str], str]:
     cfg = agents.get(name)
     if cfg:
         cmd = ["claude"]
+        # Agent-specific flags (e.g., --dangerously-skip-permissions)
+        if cfg.get("flags"):
+            for flag in cfg["flags"].split():
+                cmd.append(flag)
         if cfg.get("prompt"):
             cmd.extend(["--system-prompt", cfg["prompt"]])
         if cfg.get("mcp_config"):
@@ -781,6 +785,7 @@ async def browse_dir(request: Request, path: str = ""):
 
 async def _office_broadcast_loop():
     """Push agent state updates to all connected office clients every 2s."""
+    global _office_clients
     while True:
         await asyncio.sleep(2)
         if not _office_clients:
