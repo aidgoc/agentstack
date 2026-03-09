@@ -181,6 +181,11 @@ configure
 claude_auth
 install_xdg_interceptor
 
+# ── Generate agent configs ─────────────────────────
+echo ""
+echo "Generating agent configurations..."
+bash generate-configs.sh "$(pwd)"
+
 echo ""
 echo "Starting AgentStack..."
 echo ""
