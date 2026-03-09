@@ -4,7 +4,7 @@
 # Usage:
 #   curl -sL https://raw.githubusercontent.com/aidgoc/agentstack/main/install.sh | bash
 #
-# That's it. Installs everything, asks for your Telegram bot token, and starts.
+# That's it. Installs everything, walks you through Telegram setup, and starts.
 
 set -e
 
@@ -17,6 +17,15 @@ echo "  ║         AgentStack               ║"
 echo "  ║   Your terminal, from Telegram   ║"
 echo "  ╚══════════════════════════════════╝"
 echo ""
+
+# ── Helper: open links (browser or Telegram deep link) ──
+open_link() {
+    if [ "$PLATFORM" = "mac" ]; then
+        open "$1" 2>/dev/null || true
+    else
+        xdg-open "$1" 2>/dev/null || true
+    fi
+}
 
 # ── Detect platform & architecture ───────────────────
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -55,7 +64,7 @@ echo "  Platform: $PLATFORM ($ARCH)"
 echo ""
 
 # ── Install dependencies ────────────────────────────
-echo "[1/5] Installing dependencies..."
+echo "[1/6] Installing dependencies..."
 
 if [ "$PLATFORM" = "mac" ]; then
     command -v git &>/dev/null         || brew install git
@@ -125,16 +134,15 @@ if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }
     fi
 fi
 
-echo "  OK (Python $PY_VER)"
+echo "  ✓ Python $PY_VER"
 
 # ── Install Claude Code ─────────────────────────────
-echo "[2/5] Claude Code..."
+echo "[2/6] Claude Code..."
 if command -v claude &>/dev/null; then
-    echo "  Already installed"
+    echo "  ✓ Already installed"
 else
     echo "  Installing..."
     if [ "$PLATFORM" = "linux" ]; then
-        # Try without sudo first, fall back to sudo
         npm install -g @anthropic-ai/claude-code 2>/dev/null || \
         sudo npm install -g @anthropic-ai/claude-code 2>/dev/null || \
         { echo "  WARN: Could not install Claude Code globally. Trying npx fallback..."; }
@@ -143,7 +151,7 @@ else
     fi
 
     if command -v claude &>/dev/null; then
-        echo "  OK"
+        echo "  ✓ Installed"
     else
         echo "  WARN: 'claude' not in PATH. You can run: npx @anthropic-ai/claude-code"
         echo "        Or fix with: sudo npm install -g @anthropic-ai/claude-code"
@@ -151,7 +159,7 @@ else
 fi
 
 # ── Clone / update repo ─────────────────────────────
-echo "[3/5] AgentStack..."
+echo "[3/6] AgentStack..."
 if [ -d "$INSTALL_DIR" ]; then
     echo "  Updating..."
     cd "$INSTALL_DIR"
@@ -168,42 +176,63 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/activate
 pip install -q -r requirements.txt
-echo "  OK"
+echo "  ✓ Ready"
 
-# ── Configure ────────────────────────────────────────
-echo "[4/5] Configuration..."
+# ── Telegram Bot Setup (with deep links) ─────────────
+echo ""
+echo "[4/6] Telegram Setup..."
 if [ -f .env ] && grep -q "TELEGRAM_BOT_TOKEN=." .env 2>/dev/null && grep -q "OWNER_ID=." .env 2>/dev/null; then
-    echo "  Config found"
+    echo "  ✓ Config found"
 else
     echo ""
-    echo "  You need two things from Telegram:"
-    echo "  1. Bot token  → open @BotFather, send /newbot"
-    echo "  2. Your user ID → open @userinfobot, send /start"
+    echo "  ─── Step 1: Create a bot with @BotFather ───"
     echo ""
-    read -p "  Bot token: " BOT_TOKEN
+    echo "    Opening Telegram..."
+    open_link "https://t.me/BotFather"
+    echo "    1. Send /newbot to @BotFather"
+    echo "    2. Choose a name and username for your bot"
+    echo "    3. Copy the token it gives you"
+    echo ""
+    read -p "  Paste your bot token: " BOT_TOKEN
+
+    # Validate token
     if [ -z "$BOT_TOKEN" ]; then
-        echo "  No token provided. Run this again when ready."
+        echo "  ✗ No token provided. Run this again when ready."
         exit 1
     fi
+    GETME=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe")
+    if echo "$GETME" | grep -q '"ok":true'; then
+        BOT_NAME=$(echo "$GETME" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+        echo "  ✓ Token valid! Bot: @${BOT_NAME}"
+    else
+        echo "  ✗ Invalid token. Check and try again."
+        exit 1
+    fi
+
+    echo ""
+    echo "  ─── Step 2: Get your Telegram user ID ───"
+    echo ""
+    echo "    Opening @userinfobot..."
+    open_link "https://t.me/userinfobot"
+    echo "    Send any message — it will reply with your ID."
+    echo ""
     read -p "  Your Telegram user ID: " OWNER_ID
-    if [ -z "$OWNER_ID" ]; then
-        echo "  No user ID provided. Run this again when ready."
+    if ! [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
+        echo "  ✗ User ID must be a number. Try again."
         exit 1
     fi
+    echo "  ✓ User ID saved"
 
     cat > .env <<EOL
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 OWNER_ID=$OWNER_ID
 EOL
-    echo "  Saved"
+    echo "  ✓ Config saved"
 fi
 
 # ── Claude Code authentication ──────────────────────
-# Claude Code requires auth before agents can run.
-# Users can authenticate with an API key (easy, works on servers)
-# or via OAuth (requires running 'claude' locally once).
 echo ""
-echo "Claude Code authentication..."
+echo "[5/6] Claude Code authentication..."
 CLAUDE_AUTHED=false
 # Check common credential locations
 for cred_path in "$HOME/.claude/.credentials.json" "$HOME/.claude/auth.json" "$HOME/.config/claude/credentials.json"; do
@@ -218,7 +247,7 @@ if grep -q "ANTHROPIC_API_KEY=." .env 2>/dev/null; then
 fi
 
 if [ "$CLAUDE_AUTHED" = true ]; then
-    echo "  Already authenticated"
+    echo "  ✓ Already authenticated"
 else
     echo ""
     echo "  Agents need Claude Code authenticated. Two options:"
@@ -231,7 +260,7 @@ else
         # Remove existing key if present, then append
         grep -v "^ANTHROPIC_API_KEY=" .env > /tmp/.env_tmp 2>/dev/null && mv /tmp/.env_tmp .env || true
         echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY_INPUT" >> .env
-        echo "  Saved to .env"
+        echo "  ✓ Saved to .env"
     else
         echo ""
         echo "  Skipped. After install, run this to authenticate:"
@@ -274,12 +303,18 @@ echo "xdg-open: no browser available" >&2
 exit 1
 XDGEOF
         sudo chmod +x /usr/local/bin/xdg-open
-        echo "  OK (browser links will be forwarded to Telegram)"
+        echo "  ✓ Browser links will be forwarded to Telegram"
     fi
 fi
 
+# ── Generate agent configs ──────────────────────────
+echo ""
+echo "[6/6] Generating agent configurations..."
+bash generate-configs.sh "$(pwd)"
+
 # ── Add to PATH ─────────────────────────────────────
-echo "[5/5] Setting up command..."
+echo ""
+echo "Setting up command..."
 
 # Create agentstack command
 BIN_DIR="$HOME/.local/bin"
@@ -295,7 +330,7 @@ case "\${1:-start}" in
     watch)    exec bash sentinel.sh --watch ;;
     logs)    tail -f /tmp/agentstack/*.log ;;
     health)  curl -s http://localhost:8765/health | python3 -m json.tool ;;
-    update)  git pull origin main && pip install -q -r requirements.txt && echo "Updated. Run: agentstack start" ;;
+    update)  git pull origin main && pip install -q -r requirements.txt && bash generate-configs.sh "\$(pwd)" && echo "Updated. Run: agentstack start" ;;
     *)       echo "Usage: agentstack [start|stop|sentinel|watch|logs|health|update]" ;;
 esac
 SCRIPT
@@ -314,7 +349,7 @@ if [ -n "$SHELL_RC" ] && ! grep -q '.local/bin' "$SHELL_RC" 2>/dev/null; then
 fi
 export PATH="$BIN_DIR:$PATH"
 
-echo "  OK"
+echo "  ✓ Command installed"
 
 # ── macOS auto-start ────────────────────────────────
 if [ "$PLATFORM" = "mac" ]; then
@@ -328,12 +363,13 @@ fi
 # ── Done ─────────────────────────────────────────────
 echo ""
 echo "  ╔══════════════════════════════════╗"
-echo "  ║         Ready!                   ║"
+echo "  ║         ✓ Ready!                 ║"
 echo "  ╚══════════════════════════════════╝"
 echo ""
 echo "  Start now:     agentstack"
 echo "  Stop:          agentstack stop"
 echo "  View logs:     agentstack logs"
+echo "  Health check:  agentstack health"
 echo "  Update:        agentstack update"
 echo ""
 echo "  Installed to:  $INSTALL_DIR"
