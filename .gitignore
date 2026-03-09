@@ -3,12 +3,14 @@
 CLAUDE.md
 agents.json
 mcp-configs/
+!mcp-configs/.gitkeep
 __pycache__/
 *.pyc
 *.db
 *.db-shm
 *.db-wal
 shared/
+!shared/.gitkeep
 data/
 *.log
 .DS_Store
