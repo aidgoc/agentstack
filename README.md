@@ -4,21 +4,27 @@ Your personal terminal, from Telegram. One machine, one bot, one owner, unlimite
 
 Open a full xterm.js terminal inside Telegram — run Claude Code, bash, ssh, anything. Spawn pre-configured AI agent sessions with tools loaded. All running on your own computer.
 
-## Setup (2 steps)
+## What You Need
 
-**Step 1:** Run this in your terminal (Mac or Linux):
+- A computer (Mac or Linux) that stays on
+- A Telegram account
+- An Anthropic account ([sign up free](https://console.anthropic.com))
+
+## Install (1 command)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/aidgoc/agentstack/main/install.sh | bash
 ```
 
-It installs everything automatically and asks for two things:
-- **Bot token** — get one from [@BotFather](https://t.me/BotFather) (send `/newbot`)
-- **Your Telegram user ID** — get it from [@userinfobot](https://t.me/userinfobot) (send `/start`)
+The installer walks you through everything:
+1. Installs dependencies automatically
+2. Opens Telegram to help you create a bot
+3. Validates your bot token
+4. Sets up Claude Code authentication
+5. Configures 10 AI agents with tools
+6. Starts everything and gives you the link
 
-**Step 2:** Open your bot on Telegram and tap **"Terminal"**.
-
-That's it. You have a full terminal inside Telegram.
+Then open your bot on Telegram and tap **"Terminal"**. That's it.
 
 > **Note:** Claude Code uses your Anthropic account (not an API key). Run `claude` in any terminal to sign in with your browser the first time.
 
@@ -26,7 +32,7 @@ That's it. You have a full terminal inside Telegram.
 
 - **Full terminal** inside Telegram via xterm.js — bash, ssh, vim, anything
 - **Claude Code sessions** with pre-loaded system prompts and MCP tools
-- **9 pre-built agents** — research, writing, social media, marketing, design, analytics, CRM, dev, trend scouting
+- **10 pre-built agents** — research, writing, social media, marketing, design, analytics, CRM, dev, trend scouting, Frappe app builder
 - **Session persistence** — sessions survive server restarts (via tmux)
 - **Auto-healing** — sentinel watchdog monitors services, auto-restarts failures, alerts on Telegram
 - **File upload/download** — drag and drop files into the terminal
@@ -45,8 +51,9 @@ That's it. You have a full terminal inside Telegram.
 | **analyst** | Business/financial analysis | fetch, filesystem, sqlite |
 | **crm** | Contact & deal management | — |
 | **dev** | Senior developer | — |
+| **forge** | Frappe app builder | fetch, filesystem |
 
-Edit `agents.json` to customize prompts, models, or add your own agents.
+Agents are configured via templates in `config-templates/`. Run `bash generate-configs.sh` to regenerate `agents.json` and `mcp-configs/` after editing templates.
 
 ## Commands
 
@@ -58,7 +65,20 @@ agentstack stop       # stop all services
 agentstack sentinel   # start watchdog (auto-heal + Telegram alerts)
 agentstack logs       # tail all logs
 agentstack health     # check server status
-agentstack update     # pull latest code
+agentstack update     # pull latest + regenerate configs
+```
+
+Or with Make:
+
+```bash
+make start            # start everything
+make stop             # stop all services
+make install          # run the installer
+make upgrade          # git pull + pip install + regenerate configs
+make uninstall        # stop services + remove CLI command
+make generate-configs # regenerate agents.json + mcp-configs/
+make health           # health check
+make status           # full status overview
 ```
 
 ### Telegram Bot Commands
@@ -74,6 +94,17 @@ agentstack update     # pull latest code
 | `/team` | List agents |
 | `/hire <name>` | Create an agent |
 | `/done <id>` | Mark task done |
+
+## Docker (alternative)
+
+```bash
+git clone https://github.com/aidgoc/agentstack.git
+cd agentstack
+cp .env.example .env    # add bot token + owner ID
+docker compose up -d
+```
+
+The Docker image includes Node.js (for MCP servers via npx), uv (for uvx), and runs `generate-configs.sh` at build time. Mount `agents.json` and `mcp-configs/` as volumes to override.
 
 ## Security
 
@@ -106,7 +137,7 @@ Telegram Mini App (terminal.html)
   v
 FastAPI Server (web/server.py)
   |-- POST /api/auth: validates initData, issues session token
-  |-- WebSocket ↔ PTY sessions (token-authenticated)
+  |-- WebSocket <-> PTY sessions (token-authenticated)
   |-- tmux backend (session persistence)
   |-- 64KB replay buffer (reconnect recovery)
   |-- ping/pong keepalive (20s)
@@ -117,56 +148,66 @@ Cloudflare Tunnel (cloudflared)
   v
 Your Machine
   |-- bash, claude, ssh, python ...
-  |-- xdg-open interceptor → URLs forwarded to Telegram
+  |-- xdg-open interceptor -> URLs forwarded to Telegram
 ```
 
 ## File Structure
 
 ```
 agentstack/
-├── install.sh          # One-liner installer (curl | bash)
-├── setup.sh            # Git-clone installer (bash setup.sh)
-├── start.sh            # Launches all services
-├── sentinel.sh         # Watchdog: monitors, auto-heals, alerts
-├── bot.py              # Telegram bot (owner-only)
-├── users.py            # Auth: Telegram initData validation, session tokens
-├── store.py            # SQLite: tasks, agents, goals, activity
-├── agents.json         # Agent presets (prompts, models, MCP configs)
-├── paperclip.py        # Paperclip API client (optional integration)
-├── requirements.txt    # Python dependencies
+├── install.sh              # One-liner installer (curl | bash)
+├── setup.sh                # Git-clone installer (bash setup.sh)
+├── start.sh                # Launches all services
+├── sentinel.sh             # Watchdog: monitors, auto-heals, alerts
+├── generate-configs.sh     # Generates agents.json + mcp-configs/ from templates
+├── bot.py                  # Telegram bot (owner-only)
+├── users.py                # Auth: Telegram initData validation, session tokens
+├── store.py                # SQLite: tasks, agents, goals, activity
+├── paperclip.py            # Paperclip API client (optional integration)
+├── requirements.txt        # Python dependencies
+├── config-templates/       # Portable agent config templates
+│   ├── agents.template.json
+│   └── mcp/
+│       ├── atlas.template.json
+│       ├── social.template.json
+│       ├── marketing.template.json
+│       ├── designer.template.json
+│       ├── analyst.template.json
+│       └── forge.template.json
+├── agents.json             # Generated — do not edit (use templates)
+├── agents.example.json     # Reference for agent config format
 ├── web/
-│   ├── server.py       # FastAPI + WebSocket terminal server
+│   ├── server.py           # FastAPI + WebSocket terminal server
 │   └── static/
 │       └── terminal.html   # xterm.js terminal UI (all-in-one)
-├── mcp-configs/        # Per-agent MCP tool configurations
-│   ├── atlas.json
-│   ├── social.json
-│   ├── marketing.json
-│   ├── designer.json
-│   └── analyst.json
-├── shared/             # Inter-agent workspace
+├── mcp-configs/            # Generated — per-agent MCP tool configs
+├── shared/                 # Inter-agent workspace
 │   ├── research/
 │   ├── drafts/
 │   ├── social/
 │   ├── marketing/
 │   ├── designs/
 │   ├── analysis/
-│   └── crm_data/
+│   ├── crm_data/
+│   └── forge/
 ├── macos/
 │   └── install-service.sh  # launchd auto-start on login
-├── Dockerfile          # Docker build
-├── docker-compose.yml  # Docker Compose config
-└── .env.example        # Template for required env vars
+├── Dockerfile              # Docker build
+├── docker-compose.yml      # Docker Compose config
+├── Makefile                # make start/stop/install/upgrade/...
+└── .env.example            # Template for required env vars
 ```
 
-## Docker (alternative)
+## Troubleshooting
 
-```bash
-git clone https://github.com/aidgoc/agentstack.git
-cd agentstack
-cp .env.example .env    # add bot token + owner ID
-docker compose up -d
-```
+| Problem | Fix |
+|---------|-----|
+| "claude: command not found" | Run: `npm install -g @anthropic-ai/claude-code` |
+| Bot doesn't respond | Check token: `agentstack health` |
+| Terminal won't open | Check: `curl http://localhost:8765/health` |
+| "Permission denied" on Linux | Run installer with: `sudo bash install.sh` |
+| Tunnel URL changed | Restart: `agentstack stop && agentstack` |
+| Agents can't write files | Run: `bash generate-configs.sh` to fix paths |
 
 ## How It's Free
 
