@@ -1,10 +1,8 @@
-.PHONY: start stop sentinel setup logs health status
+.PHONY: start stop sentinel setup install uninstall upgrade logs health status generate-configs
 
-# Start all services (web server + tunnel + bot)
 start:
 	bash start.sh
 
-# Stop everything including sentinel
 stop:
 	@kill $$(cat /tmp/agentstack/sentinel.pid 2>/dev/null) 2>/dev/null || true
 	@pkill -f "web/server.py" 2>/dev/null || true
@@ -12,23 +10,38 @@ stop:
 	@pkill -f "cloudflared tunnel.*8765" 2>/dev/null || true
 	@echo "Stopped."
 
-# Start sentinel watchdog (monitors + auto-heals + alerts)
 sentinel:
 	bash sentinel.sh
 
-# First-time setup (install deps + configure)
 setup:
 	bash setup.sh
 
-# Tail all logs
+install:
+	bash install.sh
+
+uninstall:
+	@echo "Stopping services..."
+	@$(MAKE) stop 2>/dev/null || true
+	@echo "Removing agentstack command..."
+	@rm -f $$HOME/.local/bin/agentstack
+	@echo "Uninstalled. Project files remain in $(shell pwd)."
+	@echo "To fully remove: rm -rf $(shell pwd)"
+
+upgrade:
+	git pull origin main
+	pip install -q -r requirements.txt
+	bash generate-configs.sh "$(shell pwd)"
+	@echo "Upgraded. Run: make start"
+
+generate-configs:
+	bash generate-configs.sh "$(shell pwd)"
+
 logs:
 	tail -f /tmp/agentstack/*.log
 
-# Health check
 health:
 	@curl -s http://localhost:8765/health | python3 -m json.tool
 
-# Full status overview
 status:
 	@echo "=== Processes ==="
 	@ps aux | grep -E "server\.py|bot\.py|cloudflared|sentinel" | grep -v grep || echo "  Nothing running"
